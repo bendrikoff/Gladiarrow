@@ -1,3 +1,6 @@
+import bowImg from '../assets/bow.png'
+import arrowImg from '../assets/arrow.png'
+
 export class GameScene extends Phaser.Scene {
   private isPulling = false
   private pullStartX = 0
@@ -41,8 +44,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.image("bow", "/assets/bow.png")
-    this.load.image("arrow", "/assets/arrow.png")
+    this.load.image("bow", bowImg)
+    this.load.image("arrow", arrowImg)
   }
 
   create() {

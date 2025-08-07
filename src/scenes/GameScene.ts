@@ -41,8 +41,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.image("bow", "assets/bow.png")
-    this.load.image("arrow", "assets/arrow.png")
+    this.load.image("bow", "/assets/bow.png")
+    this.load.image("arrow", "/assets/arrow.png")
   }
 
   create() {

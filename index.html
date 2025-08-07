@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GAME_NAME</title>
+    <script src="https://unpkg.com/@farcade/game-sdk@latest/dist/index.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100dvh;
+        background: #000;
+        font-family: "Arial", sans-serif;
+        overflow: hidden;
+      }
+      .game-frame {
+        position: relative;
+        width: min(1000px, 100vw);
+        height: min(1800px, 100dvh);
+        aspect-ratio: 5/9;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      .game-container {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      #gameCanvas {
+        width: 100%;
+        height: 100%;
+        max-width: 1000px;
+        max-height: 100dvh;
+        object-fit: contain;
+      }
+      canvas:focus {
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="game-frame">
+      <div class="game-container" id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+      </div>
+    </div>
+    <!-- 
+      In development mode, this links to your TypeScript code.
+      In production mode, this is replaced with the compiled JavaScript.
+    -->
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

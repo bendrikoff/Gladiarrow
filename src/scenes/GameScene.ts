@@ -8,10 +8,11 @@ export class GameScene extends Phaser.Scene {
 
   private playerRoot!: Phaser.GameObjects.Container
   private playerTopParts!: Phaser.GameObjects.Container
+  private playerTopPivot!: Phaser.GameObjects.Container
 
   private player!: {
     root: Phaser.GameObjects.Container
-    head: Phaser.GameObjects.Arc
+    head: Phaser.GameObjects.Image
     body: Phaser.GameObjects.Graphics
     leftArm: Phaser.GameObjects.Graphics
     rightArm: Phaser.GameObjects.Graphics
@@ -43,6 +44,9 @@ export class GameScene extends Phaser.Scene {
   preload() {
     this.load.image("bow", "assets/bow.png")
     this.load.image("arrow", "assets/arrow.png")
+    this.load.image("head", "assets/head.png")
+    this.load.image("body", "assets/body.png")
+    this.load.image("leg", "assets/leg.png")
   }
 
   create() {
@@ -74,7 +78,7 @@ export class GameScene extends Phaser.Scene {
 
       const dy = pointer.y - this.pullStartY
       const angle = Phaser.Math.Clamp(dy * 0.0015, -0.8, 0.8)
-      this.playerTopParts.rotation = -angle
+      this.playerTopPivot.rotation = -angle
 
       this.pullStrength = Math.abs(armOffset) / 20
     }
@@ -95,16 +99,17 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createStickman(x: number, y: number) {
-    const head = this.add.circle(0, -84, 20, 0x000000)
+    const head = this.add.image(0, -95, "head")
+    head.setDisplaySize(100, 100)
 
     const leftArm = this.add.graphics()
-    leftArm.fillStyle(0x000000, 1)
-    leftArm.fillRoundedRect(-20, -60, 80, 13, 5)
+    leftArm.fillStyle(0xffd49c, 1)
+    leftArm.fillRoundedRect(-10, -60, 50, 13, 5)
     leftArm.rotation = -0.1
 
     const rightArm = this.add.graphics()
-    rightArm.fillStyle(0x000000, 1)
-    rightArm.fillRoundedRect(13, -60, 80, 13, 5)
+    rightArm.fillStyle(0xffd49c, 1)
+    rightArm.fillRoundedRect(30, -60, 50, 13, 5)
 
     const bowImage = this.add.image(50, -50, "bow")
     bowImage.setScale(0.13)
@@ -113,7 +118,6 @@ export class GameScene extends Phaser.Scene {
     const bowstring = this.createBowstring()
 
     const topParts = this.add.container(0, 0, [
-      head,
       leftArm,
       rightArm,
       bowImage,
@@ -121,25 +125,35 @@ export class GameScene extends Phaser.Scene {
     ])
     this.playerTopParts = topParts
 
-    const body = this.add.graphics()
-    body.fillStyle(0x000000, 1)
-    body.fillRoundedRect(-20, -60, 40, 80, 5)
+    const body = this.add.image(0, -30, "body");
+    body.setDisplaySize(60, 60);
 
-    const leftLeg = this.add.graphics()
-    leftLeg.fillStyle(0x000000, 1)
-    leftLeg.fillRoundedRect(-20, 13, 13, 80, 5)
+    const leftLeg = this.add.image(-10, 5, "leg")
+    leftLeg.setDisplaySize(20, 20)
 
-    const rightLeg = this.add.graphics()
-    rightLeg.fillStyle(0x000000, 1)
-    rightLeg.fillRoundedRect(7, 13, 13, 80, 5)
+    const rightLeg = this.add.image(20, 5, "leg")
+    rightLeg.setDisplaySize(20, 20)
 
+    // Wrap topParts with a pivot container so we can define a custom rotation center
+    this.playerTopPivot = this.add.container(-50, 0, [topParts])
+
+    // Create root first so bounds are in place
     const root = this.add.container(x, y, [
-      topParts,
-      body,
+      head,
       leftLeg,
       rightLeg,
+      body,
+      this.playerTopPivot,
     ])
     this.playerRoot = root
+
+    // Compute geometric center of topParts and re-center under pivot (0,0)
+    const b = topParts.getBounds()
+    const centerLocalX = b.centerX - root.x
+    const centerLocalY = b.centerY - root.y
+    this.playerTopPivot.setPosition(centerLocalX, centerLocalY)
+    topParts.x = -centerLocalX
+    topParts.y = -centerLocalY
 
     const bodyPhysics = this.matter.add.rectangle(x, y, 60, 160, {
       isStatic: true,
@@ -199,23 +213,28 @@ export class GameScene extends Phaser.Scene {
     this.lastShotTime = currentTime
 
     const bowImage = this.playerTopParts.getAt(3) as Phaser.GameObjects.Image
-    const bowGlobal = bowImage.getWorldTransformMatrix()
-    const arrowX = bowGlobal.tx + 10
-    const arrowY = bowGlobal.ty
+    const bowWorld = bowImage.getWorldTransformMatrix()
+
+    // Мировая позиция и угол лука
+    const bowX = bowWorld.tx
+    const bowY = bowWorld.ty - 50;
+    const bowAngle = Math.atan2(bowWorld.b, bowWorld.a)
+
+    // Смещение точки вылета вдоль направления лука (чуть вперёд от центра)
+    const muzzleOffset = 10
+    const arrowX = bowX + Math.cos(bowAngle) * muzzleOffset
+    const arrowY = bowY + Math.sin(bowAngle) * muzzleOffset
 
     const arrow = this.matter.add.image(arrowX, arrowY, "arrow")
     arrow.setScale(0.1)
-    arrow.setRotation(this.playerTopParts.rotation)
+    arrow.setRotation(bowAngle)
     arrow.setBody({ type: 'rectangle', width: 40, height: 6 })
     arrow.setMass(1)
 
     const velocity = this.pullStrength * 15
-    const angle = this.playerTopParts.rotation
-
-    arrow.setVelocity(
-      Math.cos(angle) * velocity,
-      Math.sin(angle) * velocity
-    )
+    const vx = Math.cos(bowAngle) * velocity
+    const vy = Math.sin(bowAngle) * velocity
+    arrow.setVelocity(vx, vy)
 
     this.arrows.push(arrow)
 

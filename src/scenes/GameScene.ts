@@ -1,3 +1,25 @@
+// --- враги (мульти) ---
+type EnemyArcher = {
+  root: Phaser.GameObjects.Container
+  head: Phaser.GameObjects.Image
+  body: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
+  leftArm: Phaser.GameObjects.Graphics
+  rightArm: Phaser.GameObjects.Graphics
+  leftLeg: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
+  rightLeg: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
+  bowstring: Phaser.GameObjects.Graphics
+  bodyPhysics: MatterJS.BodyType
+  topParts: Phaser.GameObjects.Container
+  // state
+  baseRightArmX: number
+  isPulling: boolean
+  pullStrength: number
+  lastShotTime: number
+  shotCooldown: number
+  aimOffsetRad: number
+  pullTarget: number
+  isDying: boolean
+}
 export class GameScene extends Phaser.Scene {
   // --- игрок ---
   private isPulling = false
@@ -12,7 +34,6 @@ export class GameScene extends Phaser.Scene {
   private screenW = 0
   private groundY = 1500
 
-  private towerTopPoint = 0
   private isPlayerMoving = false
 
   private playerRoot!: Phaser.GameObjects.Container
@@ -35,63 +56,26 @@ export class GameScene extends Phaser.Scene {
   private spawnX = 100
   private spawnY = 1175
 
-  // --- враг ---
-  private enemyRoot!: Phaser.GameObjects.Container
-  private enemyTopPivot!: Phaser.GameObjects.Container
-  private enemyBaseRightArmX = 0
-  private enemyIsPulling = false
-  private enemyPullStrength = 0
-  private enemyLastShotTime = 0
-  private enemyShotCooldown = 2000
+  private enemies: EnemyArcher[] = []
 
   // AI диапазоны
   private enemyShotCooldownRange = { min: 900, max: 1600 } // мс
   private enemyAimOffsetRangeDeg = { min: -60, max: 10 }   // градусы
   private enemyPullRange = { min: 0.5, max: 3.5 }          // сила (|dx|/20)
 
-  // выбранные на текущий выстрел параметры
-  private enemyCurrentAimOffset = 0 // радианы
-  private enemyCurrentPull = 1.0
-
   // якоря тетивы врага (лук влево)
   private enemyStringTop    = new Phaser.Math.Vector2(-65, -75)
   private enemyStringBottom = new Phaser.Math.Vector2(-75,  20)
-
-  private enemy!: {
-    root: Phaser.GameObjects.Container
-    head: Phaser.GameObjects.Image
-    body: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
-    leftArm: Phaser.GameObjects.Graphics
-    rightArm: Phaser.GameObjects.Graphics
-    leftLeg: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
-    rightLeg: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
-    bowstring: Phaser.GameObjects.Graphics
-    bodyPhysics: MatterJS.BodyType
-    topParts?: Phaser.GameObjects.Container
-  }
-
-  private enemyIsDying = false
-  private enemyCollisionHandler?: (e: MatterJS.ICollisionStartEvent) => void
 
   // --- счёт ---
   private score = 0
   private scoreText!: Phaser.GameObjects.Text
 
-  // --- башня (для удаления) ---
-  private towerData?: {
-    bottom: Phaser.GameObjects.Image
-    bodies: Phaser.GameObjects.Image[]
-    top: Phaser.GameObjects.Image
-    bodyCount: number
-    x: number
-    y: number
-    width: number
-    height: number
-    topY: number
-  }
-
-  // поверхность — будем её «переставлять» на новый экран
+  // поверхность
   private surface!: Phaser.Physics.Matter.Image
+
+  // коллекция сгенерированных башен для очистки между экранами
+  private towers: { images: Phaser.GameObjects.Image[]; sensor: MatterJS.BodyType; x: number; topY: number }[] = []
 
   constructor() { super("GameScene") }
 
@@ -103,7 +87,7 @@ export class GameScene extends Phaser.Scene {
     this.load.image("body", "assets/player/body.png")
     this.load.image("leg", "assets/player/leg.png")
     this.load.image("surface", "assets/surface.png")
-    // башня
+    // башни
     this.load.image("towerTop", "assets/towerTop.png")
     this.load.image("towerBody", "assets/towerBody.png")
     this.load.image("towerBottom", "assets/towerBottom.png")
@@ -116,18 +100,23 @@ export class GameScene extends Phaser.Scene {
   create() {
     this.screenW = this.scale.width
 
-    // камера: сразу большие границы вправо (на много экранов)
+    // камера: большие границы вправо
     const worldWidth = this.screenW * 100
     this.cameras.main.setBounds(0, 0, worldWidth, this.scale.height * 2)
-    this.cameras.main.setScroll(0, 0) // стартовый экран
-    // UI поверх камеры
+    this.cameras.main.setScroll(0, 0)
+
+    // UI
     this.addScoreUI()
 
-    // поверхность и первый «уровень»
+    // поверхность и первый «экран»
     this.createSurface(this.levelCenterX(this.currentLevel))
-    this.createTowerRightCorner(this.currentLevel)
+
+    // игрок
     this.player = this.createStickman(this.spawnX, this.spawnY)
-    this.createEnemy()
+
+    // ДВЕ башни и ДВА врага на текущем экране
+    this.spawnTwoTowersAndEnemies(this.currentLevel)
+
     this.addInputHandlers()
 
     // Удаление стрел, вонзившихся в землю, спустя время
@@ -144,14 +133,8 @@ export class GameScene extends Phaser.Scene {
         const isGroundA = goA.texture?.key === 'surface' || goA.getData?.('isGround')
         const isGroundB = goB.texture?.key === 'surface' || goB.getData?.('isGround')
 
-        // arrow (A) hits ground (B)
-        if (isArrowA && isGroundB) {
-          this.stickAndScheduleRemove(goA as Phaser.Physics.Matter.Image)
-        }
-        // arrow (B) hits ground (A)
-        if (isArrowB && isGroundA) {
-          this.stickAndScheduleRemove(goB as Phaser.Physics.Matter.Image)
-        }
+        if (isArrowA && isGroundB) this.stickAndScheduleRemove(goA as Phaser.Physics.Matter.Image)
+        if (isArrowB && isGroundA) this.stickAndScheduleRemove(goB as Phaser.Physics.Matter.Image)
       }
     })
   }
@@ -184,8 +167,8 @@ export class GameScene extends Phaser.Scene {
     }
     if (!this.isPlayerMoving && this.isPulling) this.updateBowstring()
 
-    // враг — прицел и тайминг
-    this.updateEnemyAI()
+    // враги — прицел и тайминг
+    this.updateEnemiesAI()
 
     // подчистка стрел
     this.arrows = this.arrows.filter(a => {
@@ -195,7 +178,7 @@ export class GameScene extends Phaser.Scene {
     })
   }
 
-  // ---------- helpers для уровней/камеры ----------
+  // ---------- helpers уровней/камеры ----------
   private levelLeftX(level: number) { return level * this.screenW }
   private levelCenterX(level: number) { return level * this.screenW + this.screenW / 2 }
   private levelRightX(level: number) { return (level + 1) * this.screenW }
@@ -214,7 +197,7 @@ export class GameScene extends Phaser.Scene {
       stroke: "#000000",
       strokeThickness: 6
     }).setOrigin(0.5, 0).setDepth(1000)
-    this.scoreText.setScrollFactor(0) // фиксируем к экрану
+    this.scoreText.setScrollFactor(0)
   }
 
   // ---------- игрок ----------
@@ -318,7 +301,6 @@ export class GameScene extends Phaser.Scene {
   private addInputHandlers() {
     this.input.on("pointerdown", (p: Phaser.Input.Pointer) => {
       if (this.isPlayerMoving) return
-      // учитываем скролл камеры
       this.isPulling = true
       this.pullStartX = p.x + this.cameras.main.scrollX
       this.pullStartY = p.y
@@ -344,17 +326,8 @@ export class GameScene extends Phaser.Scene {
     })
   }
 
-  // ---------- враг ----------
-  private createEnemy(): void {
-    // x врага — у правой башни текущего экрана
-    const ex = this.towerData ? this.towerData.x - 20 : this.levelRightX(this.currentLevel) - 120
-    const ey = this.towerTopPoint || 1000
-    this.enemy = this.createEnemyArcher(ex, ey)
-    this.enemyRoot = this.enemy.root
-    this.setupArrowEnemyCollision(this.enemy.bodyPhysics)
-  }
-
-  private createEnemyArcher(x: number, y: number) {
+  // ---------- враги (двое) ----------
+  private createEnemyArcher(x: number, y: number): EnemyArcher {
     const leftArm = this.add.graphics()
     leftArm.fillStyle(0x613e26, 1).fillRoundedRect(-10, -60, 50, 13, 5)
     leftArm.rotation = -0.1
@@ -378,28 +351,30 @@ export class GameScene extends Phaser.Scene {
     const leftLeg  = this.add.image(-10, 5, "enemy_leg").setDisplaySize(20, 20)
     const rightLeg = this.add.image(20, 5, "enemy_leg").setDisplaySize(20, 20)
 
-    this.enemyTopPivot = this.add.container(50, -30, [topParts])
-    const root = this.add.container(x, y, [head, leftLeg, rightLeg, body, this.enemyTopPivot])
-    this.enemyRoot = root
+    const enemyTopPivot = this.add.container(50, -30, [topParts])
+    const root = this.add.container(x, y, [head, leftLeg, rightLeg, body, enemyTopPivot])
 
     const bodyPhysics = this.matter.add.rectangle(x, y - 50, 60, 160, { isStatic: true })
 
-    this.enemyBaseRightArmX = rightArm.x
-
-    const enemy = {
-      root,
-      head,
-      body: body as any,
-      leftArm,
-      rightArm,
-      leftLeg: leftLeg as any,
-      rightLeg: rightLeg as any,
-      bowstring,
-      bodyPhysics,
-      topParts
+    const enemy: EnemyArcher = {
+      root, head, body: body as any, leftArm, rightArm,
+      leftLeg: leftLeg as any, rightLeg: rightLeg as any,
+      bowstring, bodyPhysics, topParts,
+      baseRightArmX: rightArm.x,
+      isPulling: false,
+      pullStrength: 0,
+      lastShotTime: 0,
+      shotCooldown: Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max),
+      aimOffsetRad: 0,
+      pullTarget: 1,
+      isDying: false
     }
 
-    this.resetEnemyBowstring()
+    // сохраняем пивот как data, чтобы вращать верх отдельно для каждого
+    ;(enemy as any).topPivot = enemyTopPivot
+
+    this.resetEnemyBowstring(enemy)
+    this.setupArrowEnemyCollision(enemy)
     return enemy
   }
 
@@ -412,12 +387,11 @@ export class GameScene extends Phaser.Scene {
     return g
   }
 
-  private updateEnemyBowstring() {
-    if (!this.enemy) return
-    const r = this.enemy.rightArm
+  private updateEnemyBowstring(enemy: EnemyArcher) {
+    const r = enemy.rightArm
     const midX = r.x + 55 // 30 + 25
     const midY = r.y - 60 + 13 / 2
-    const g = this.enemy.bowstring
+    const g = enemy.bowstring
     g.clear().lineStyle(4, 0xffffff).beginPath()
     g.moveTo(this.enemyStringTop.x, this.enemyStringTop.y)
     g.lineTo(midX, midY)
@@ -425,87 +399,80 @@ export class GameScene extends Phaser.Scene {
     g.strokePath()
   }
 
-  private resetEnemyBowstring() {
-    if (!this.enemy) return
-    const g = this.enemy.bowstring
+  private resetEnemyBowstring(enemy: EnemyArcher) {
+    const g = enemy.bowstring
     g.clear().lineStyle(4, 0xffffff).beginPath()
     g.moveTo(this.enemyStringTop.x, this.enemyStringTop.y)
     g.lineTo(this.enemyStringBottom.x, this.enemyStringBottom.y)
     g.strokePath()
   }
 
-  // прицел + запуск натяжения по кулдауну (без дрожи)
-  private updateEnemyAI() {
-    if (!this.enemy || !this.enemyRoot || !this.playerRoot || this.enemyIsDying) return
-
-    // базовый по вертикали на игрока
-    const dy = this.playerRoot.y - this.enemyRoot.y
-    const baseAimAngle = Phaser.Math.Clamp(dy * 0.0015, -0.8, 0.8)
-
-    // не рандомим каждый кадр
-    this.enemyTopPivot.rotation = -(baseAimAngle + this.enemyCurrentAimOffset)
+  private updateEnemiesAI() {
+    if (!this.playerRoot) return
 
     const now = Date.now()
-    if (!this.enemyIsPulling && now - this.enemyLastShotTime >= this.enemyShotCooldown) {
-      this.startEnemyPullSequence()
+    for (const enemy of this.enemies) {
+      if (enemy.isDying) continue
+
+      // поворот верха (как в одиночном варианте)
+      const dy = this.playerRoot.y - enemy.root.y
+      const baseAimAngle = Phaser.Math.Clamp(dy * 0.0015, -0.8, 0.8)
+      const topPivot = (enemy as any).topPivot as Phaser.GameObjects.Container
+      topPivot.rotation = -(baseAimAngle + enemy.aimOffsetRad)
+
+      if (!enemy.isPulling && now - enemy.lastShotTime >= enemy.shotCooldown) {
+        this.startEnemyPullSequence(enemy)
+      }
     }
   }
 
-  private startEnemyPullSequence() {
-    if (!this.enemy || this.enemyIsDying) return
-    this.enemyIsPulling = true
+  private startEnemyPullSequence(enemy: EnemyArcher) {
+    enemy.isPulling = true
 
-    // случайные параметры на этот выстрел
-    this.enemyCurrentAimOffset = Phaser.Math.DEG_TO_RAD *
+    enemy.aimOffsetRad = Phaser.Math.DEG_TO_RAD *
       Phaser.Math.FloatBetween(this.enemyAimOffsetRangeDeg.min, this.enemyAimOffsetRangeDeg.max)
-    this.enemyCurrentPull = Phaser.Math.FloatBetween(this.enemyPullRange.min, this.enemyPullRange.max)
-    this.enemyShotCooldown = Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max)
+    enemy.pullTarget = Phaser.Math.FloatBetween(this.enemyPullRange.min, this.enemyPullRange.max)
+    enemy.shotCooldown = Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max)
 
-    // подготовка
-    this.tweens.killTweensOf(this.enemy.rightArm)
-    const base = this.enemyBaseRightArmX
-    this.enemy.rightArm.x = base
-    this.resetEnemyBowstring()
+    this.tweens.killTweensOf(enemy.rightArm)
+    enemy.rightArm.x = enemy.baseRightArmX
+    this.resetEnemyBowstring(enemy)
 
-    const pullPixels = Phaser.Math.Clamp(this.enemyCurrentPull * 20, 4, 30)
+    const pullPixels = Phaser.Math.Clamp(enemy.pullTarget * 20, 4, 30)
 
-    // 1) натягиваем руку строго назад (влево)
     this.tweens.add({
-      targets: this.enemy.rightArm,
-      x: base - pullPixels,
+      targets: enemy.rightArm,
+      x: enemy.baseRightArmX - pullPixels,
       duration: 240 + (pullPixels - 20) * 3,
       ease: "Quad.Out",
       onUpdate: () => {
-        this.enemyPullStrength = Math.abs(this.enemy.rightArm.x - base) / 20
-        this.updateEnemyBowstring()
+        enemy.pullStrength = Math.abs(enemy.rightArm.x - enemy.baseRightArmX) / 20
+        this.updateEnemyBowstring(enemy)
       },
       onComplete: () => {
-        // 2) выстрел + возврат
-        this.enemyShootArrow()
+        this.enemyShootArrow(enemy)
         this.tweens.add({
-          targets: this.enemy.rightArm,
-          x: base,
+          targets: enemy.rightArm,
+          x: enemy.baseRightArmX,
           duration: 140,
           ease: "Quad.In",
-          onUpdate: () => this.updateEnemyBowstring(),
+          onUpdate: () => this.updateEnemyBowstring(enemy),
           onComplete: () => {
-            this.enemyIsPulling = false
-            this.enemyPullStrength = 0
-            this.enemyLastShotTime = Date.now()
-            this.resetEnemyBowstring()
+            enemy.isPulling = false
+            enemy.pullStrength = 0
+            enemy.lastShotTime = Date.now()
+            this.resetEnemyBowstring(enemy)
           }
         })
       }
     })
   }
 
-  private enemyShootArrow() {
-    if (!this.enemy || this.enemyIsDying) return
-
-    const pull = Math.abs(this.enemy.rightArm.x - this.enemyBaseRightArmX) / 20
+  private enemyShootArrow(enemy: EnemyArcher) {
+    const pull = Math.abs(enemy.rightArm.x - enemy.baseRightArmX) / 20
     if (pull <= 0) return
 
-    const rightArm = this.enemy.rightArm as Phaser.GameObjects.Graphics
+    const rightArm = enemy.rightArm as Phaser.GameObjects.Graphics
     const m = (rightArm as any).getWorldTransformMatrix()
 
     const localX = 30
@@ -532,9 +499,6 @@ export class GameScene extends Phaser.Scene {
 
   // ---------- поверхность ----------
   private createSurface(centerX: number): void {
-    // если поверхность уже есть — просто переносим её (и тело переместится)
-
-    // иначе создаём
     const tex = this.textures.get("surface").getSourceImage() as HTMLImageElement
     const scale = this.screenW / tex.width
 
@@ -545,18 +509,15 @@ export class GameScene extends Phaser.Scene {
     surf.setDepth(-5)
     this.surface = surf
 
-    // «встревание» стрел в землю
     this.setupArrowSurfaceCollision(surf)
   }
 
   private stickAndScheduleRemove(arrow: Phaser.Physics.Matter.Image) {
     if (!arrow || !arrow.body || arrow.getData?.('stuck')) return
     arrow.setData?.('stuck', true)
-    // Останавливаем и фиксируем стрелу на месте
     arrow.setVelocity(0, 0)
     arrow.setAngularVelocity(0)
     arrow.setStatic(true)
-    // Удаляем через 1500 мс
     this.time.delayedCall(1500, () => {
       this.tweens.add({
         targets: arrow,
@@ -567,20 +528,16 @@ export class GameScene extends Phaser.Scene {
         onComplete: () => {
           if (!arrow.scene) return
           arrow.destroy()
-          // подчистим из массива
           this.arrows = this.arrows.filter(a => a !== arrow)
         }
       })
     })
   }
 
-  // ---------- башня ----------
-  private createTowerRightCorner(level: number) {
-    this.destroyTower()
-
+  // ---------- простая башня (3 куска) ----------
+  private createTowerAtPosition(x: number, groundY: number) {
+    // Процедурная башня как раньше: картинки без физики + один сенсор (чтобы не мешать стрелам)
     const scale = 0.6
-    const marginRight = 10
-    const groundY = 1200
 
     const getSize = (key: string) => {
       const img = this.textures.get(key).getSourceImage() as HTMLImageElement
@@ -595,47 +552,39 @@ export class GameScene extends Phaser.Scene {
     const totalH = szBottom.h + bodyCount * szBody.h + szTop.h
     const maxW   = Math.max(szBottom.w, szBody.w, szTop.w)
 
-    // X башни — у правого края ТЕКУЩЕГО ЭКРАНА
-    const x = this.levelRightX(level) - marginRight - maxW / 2
-    const towerCenterY = groundY - totalH / 2
+    const centerY = groundY - totalH / 2
 
     let currentY = groundY
 
+    const images: Phaser.GameObjects.Image[] = []
+
     const bottom = this.add.image(x, currentY - szBottom.h / 2, "towerBottom")
     bottom.setScale(scale)
+    images.push(bottom)
     currentY -= szBottom.h
 
-    const bodies: Phaser.GameObjects.Image[] = []
     for (let i = 0; i < bodyCount; i++) {
       const b = this.add.image(x, currentY - szBody.h / 2, "towerBody")
       b.setScale(scale)
-      bodies.push(b)
+      images.push(b)
       currentY -= szBody.h
     }
 
     const top = this.add.image(x, currentY - szTop.h / 2, "towerTop")
     top.setScale(scale)
+    images.push(top)
 
-    // сенсор (не мешает стрелам/врагам)
-    this.matter.add.rectangle(x, towerCenterY, maxW, totalH, {
+    // Сенсор: не блокирует, нужен только для клипов/логики при желании
+    const sensor = this.matter.add.rectangle(x, centerY, maxW, totalH, {
       isStatic: true,
       isSensor: true,
       collisionFilter: { category: 0x0002, mask: 0 }
     })
 
-    this.towerTopPoint = top.y - (szTop.h / 2)
-    this.towerData = {
-      bottom, bodies, top, bodyCount,
-      x, y: towerCenterY, width: maxW, height: totalH, topY: this.towerTopPoint
-    }
-  }
+    const topY = top.y - (szTop.h / 2)
 
-  private destroyTower() {
-    if (!this.towerData) return
-    this.towerData.bottom.destroy()
-    this.towerData.bodies.forEach(b => b.destroy())
-    this.towerData.top.destroy()
-    this.towerData = undefined
+    this.towers.push({ images, sensor, x, topY })
+    return { x, topY }
   }
 
   // ---------- коллизии ----------
@@ -646,46 +595,36 @@ export class GameScene extends Phaser.Scene {
     this.matter.world.on("collisionstart", (event: MatterJS.ICollisionStartEvent) => {
       event.pairs.forEach(pair => {
         let arrowBody: MatterJS.BodyType | null = null
-
         if (pair.bodyA === surfaceBody && (pair.bodyB as any).isArrow) {
           arrowBody = pair.bodyB
         } else if (pair.bodyB === surfaceBody && (pair.bodyA as any).isArrow) {
           arrowBody = pair.bodyA
         }
         if (!arrowBody) return
-
         if ((arrowBody as any).isFlying) {
           const angle = (arrowBody as any).angle || 0
-
           Body.setVelocity(arrowBody, { x: 0, y: 0 })
           Body.set(arrowBody, { angularVelocity: 0 })
           Body.setAngle(arrowBody, angle)
           Body.setStatic(arrowBody, true)
           Body.translate(arrowBody, { x: Math.cos(angle) * 2, y: Math.sin(angle) * 2 })
-
           ;(arrowBody as any).isFlying = false
         }
       })
     })
   }
 
-  private setupArrowEnemyCollision(enemyBodyRef: MatterJS.BodyType) {
-    if (this.enemyCollisionHandler) {
-      this.matter.world.off("collisionstart", this.enemyCollisionHandler as any)
-      this.enemyCollisionHandler = undefined
-    }
-
+  private setupArrowEnemyCollision(enemy: EnemyArcher) {
     const handler = (event: MatterJS.ICollisionStartEvent) => {
       event.pairs.forEach(pair => {
         let arrowBody: MatterJS.BodyType | null = null
         let hitEnemy = false
-
-        if ((pair.bodyA as any).isArrow && pair.bodyB === enemyBodyRef) {
+        if ((pair.bodyA as any).isArrow && pair.bodyB === enemy.bodyPhysics) {
           arrowBody = pair.bodyA; hitEnemy = true
-        } else if ((pair.bodyB as any).isArrow && pair.bodyA === enemyBodyRef) {
+        } else if ((pair.bodyB as any).isArrow && pair.bodyA === enemy.bodyPhysics) {
           arrowBody = pair.bodyB; hitEnemy = true
         }
-        if (!hitEnemy || !arrowBody || !this.enemy || this.enemyIsDying) return
+        if (!hitEnemy || !arrowBody || enemy.isDying) return
         if ((arrowBody as any).owner !== 'player') return
         if (!(arrowBody as any).isFlying) return
 
@@ -702,164 +641,109 @@ export class GameScene extends Phaser.Scene {
           arrowGO.destroy()
         }
 
-        // смерть врага и переход
-        this.killEnemyWithDelay(350)
+        // смерть конкретного врага
+        this.killEnemyWithDelay(enemy, 350)
       })
     }
-
-    this.enemyCollisionHandler = handler
     this.matter.world.on("collisionstart", handler as any)
   }
 
-  // ---------- смерть врага и переход на новый экран ----------
-  private killEnemyWithDelay(fadeDelayMs: number) {
-    if (!this.enemy || this.enemyIsDying) return
-    this.enemyIsDying = true
+  // ---------- смерть врага и переход на новый экран, когда оба мертвы ----------
+  private killEnemyWithDelay(enemy: EnemyArcher, fadeDelayMs: number) {
+    if (enemy.isDying) return
+    enemy.isDying = true
 
-    this.tweens.killTweensOf(this.enemy.rightArm)
-    this.enemyIsPulling = false
+    this.tweens.killTweensOf(enemy.rightArm)
+    enemy.isPulling = false
 
-    const root = this.enemy.root
-
-    this.tweens.add({
-      targets: root,
-      scaleX: 1.08,
-      scaleY: 0.92,
-      duration: 120,
-      yoyo: true,
-      ease: "Quad.Out"
-    })
+    this.tweens.add({ targets: enemy.root, scaleX: 1.08, scaleY: 0.92, duration: 120, yoyo: true, ease: "Quad.Out" })
 
     this.tweens.add({
-      targets: root,
+      targets: enemy.root,
       alpha: 0,
       delay: fadeDelayMs,
       duration: 300,
       ease: "Quad.In",
       onComplete: () => {
-        root.destroy(true)
-        if (this.enemy?.bodyPhysics) this.matter.world.remove(this.enemy.bodyPhysics)
-        this.enemy = undefined as any
-        this.enemyRoot = undefined as any
-        this.enemyIsDying = false
-
-        // Переход на следующий экран
-        this.advanceToNextScreen()
+        enemy.root.destroy(true)
+        this.matter.world.remove(enemy.bodyPhysics)
+        this.enemies = this.enemies.filter(e => e !== enemy)
+        // если все враги на экране мертвы — двигаемся дальше
+        if (this.enemies.length === 0) this.advanceToNextScreen()
       }
     })
   }
 
   private advanceToNextScreen() {
     if (!this.playerRoot) return
-    this.startRound();
+    this.startRound()
     this.isPlayerMoving = true
     this.currentLevel += 1
 
-    // целевая позиция игрока — левый край нового экрана (например, +200px)
     const targetPlayerX = this.levelLeftX(this.currentLevel) + 100
 
-    // камера плавно панит на центр нового экрана
     this.panToLevel(this.currentLevel, 600)
 
     this.createSurface(this.levelCenterX(this.currentLevel))
-    // спавним новую башню и врага под новый экран
-    this.createTowerRightCorner(this.currentLevel)
-    this.createEnemy()
 
-    // легкая «анимация шага»
-    const bob = this.tweens.add({
-      targets: this.playerRoot,
-      y: this.playerRoot.y - 6,
-      duration: 180,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.InOut"
-    })
+    // очистить башни прошлого экрана (на всякий случай)
+    this.destroyTowers()
 
-    // сам игрок едет вправо на новый экран
+    // СПАВН: две башни и два врага на новом экране
+    this.spawnTwoTowersAndEnemies(this.currentLevel)
+
+    const bob = this.tweens.add({ targets: this.playerRoot, y: this.playerRoot.y - 6, duration: 180, yoyo: true, repeat: -1, ease: "Sine.InOut" })
+
     this.tweens.add({
       targets: this.playerRoot,
       x: targetPlayerX,
       duration: Math.max(500, Math.abs(targetPlayerX - this.playerRoot.x) * 1.2),
       ease: "Quad.Out",
-      onComplete: () => {
-        bob.stop()
-        // снова можно стрелять
-        this.isPlayerMoving = false
-      }
+      onComplete: () => { bob.stop(); this.isPlayerMoving = false }
     })
   }
 
   private startRound() {
-    // Сброс позиции игрока
-    if (this.playerRoot) {
-      this.playerRoot.setPosition(this.playerRoot.x, this.spawnY)
-    }
-    // Сброс ориентации верхней части
-    if (this.playerTopParts) {
-      this.playerTopParts.rotation = 0
-    }
-    // Рука и натяжение
-    if (this.player && this.player.leftArm) {
-      this.player.leftArm.x = 0
-    }
+    if (this.playerRoot) this.playerRoot.setPosition(this.playerRoot.x, this.spawnY)
+    if (this.playerTopParts) this.playerTopParts.rotation = 0
+    if (this.player && this.player.leftArm) this.player.leftArm.x = 0
     this.pullStrength = 0
     this.resetBowstring()
   }
 
-  // ---------- генерация башен с врагами ----------
-  private generateTowersWithEnemies(): void {
-    const numTowers = Phaser.Math.Between(1, 3)
-    const screenW = this.scale.width
-    const towerSpacing = screenW / (numTowers + 1) // Равномерно распределяем башни
-    
-    for (let i = 0; i < numTowers; i++) {
-      const towerX = towerSpacing * (i + 1)
-      const towerY = 1000
-      
-      // Создаём башню
-      this.createTowerAtPosition(towerX, towerY)
-      
-      // Создаём врага на башне
-      const enemyX = towerX
-      const enemyY = towerY - 200 // Враг выше башни
-      this.createEnemyOnTower(enemyX, enemyY)
+  // очистка всех сгенерированных башен
+  private destroyTowers() {
+    for (const t of this.towers) {
+      try {
+        t.images.forEach(img => img.destroy())
+        if (t.sensor) this.matter.world.remove(t.sensor)
+      } catch {}
     }
+    this.towers = []
   }
 
-  private createEnemyOnTower(x: number, y: number): void {
-    // Создаём врага-лучника на башне
-    const enemy = this.createEnemyArcher(x, y)
-    
-    // Делаем врага статичным (стоит на башне)
-    if (enemy.bodyPhysics) {
-      enemy.bodyPhysics.isStatic = true
+  // ---------- ДВЕ башни + ДВА врага ----------
+  private spawnTwoTowersAndEnemies(level: number) {
+    // очистка старых башен и врагов
+    this.destroyTowers()
+    for (const e of this.enemies) {
+      try { e.root.destroy(true); this.matter.world.remove(e.bodyPhysics) } catch {}
     }
-    
-    // Лук уже есть у врага (создаётся в createEnemyArcher)
-    
-    // Сохраняем врага для дальнейшего использования
-    if (!this.towerEnemies) this.towerEnemies = []
-    this.towerEnemies.push({
-      stickman: enemy,
-      bow: enemy.topParts, // У врага уже есть лук в topParts
-      position: { x, y }
-    })
-  }
+    this.enemies = []
 
-  private createTowerAtPosition(x: number, y: number): void {
-    // Создаём башню в указанной позиции
-    const towerTop = this.matter.add.image(x, y - 100, "towerTop", undefined, { isStatic: true })
-    towerTop.setScale(0.8)
-    
-    const towerBody = this.matter.add.image(x, y, "towerBody", undefined, { isStatic: true })
-    towerBody.setScale(0.8)
-    
-    const towerBottom = this.matter.add.image(x, y + 100, "towerBottom", undefined, { isStatic: true })
-    towerBottom.setScale(0.8)
-    
-    // Добавляем в массив для отслеживания
-    if (!this.towerParts) this.towerParts = []
-    this.towerParts.push(towerTop, towerBody, towerBottom)
+    // две башни у правого края экрана, с зазором
+    const right = this.levelRightX(level)
+    const towerYGround = 1200
+    const tower1X = right - 360
+    const tower2X = right - 120
+
+    const t1 = this.createTowerAtPosition(tower1X, towerYGround)
+    const t2 = this.createTowerAtPosition(tower2X, towerYGround)
+
+    // ставим врагов на крыши (небольшой запас вниз от топ-края)
+    const e1 = this.createEnemyArcher(t1.x, t1.topY)
+    const e2 = this.createEnemyArcher(t2.x, t2.topY)
+
+    this.enemies.push(e1, e2)
   }
 }

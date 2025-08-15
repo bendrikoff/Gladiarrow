@@ -14,13 +14,13 @@ const config: Phaser.Types.Core.GameConfig = {
     parent: "gameContainer",
   },
   canvas: canvas,
-  backgroundColor: "#f5c84c",
+  backgroundColor: "#75c5dc",
   scene: [GameScene],
   physics: {
     default: 'matter', 
     matter: {
       gravity: { y: 0.6 },
-      debug: true
+      debug: false
     }
   },
   // Target frame rate

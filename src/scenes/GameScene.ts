@@ -20,6 +20,7 @@ type EnemyArcher = {
   pullTarget: number
   isDying: boolean
 }
+
 export class GameScene extends Phaser.Scene {
   // --- игрок ---
   private isPulling = false
@@ -77,6 +78,18 @@ export class GameScene extends Phaser.Scene {
   // коллекция сгенерированных башен для очистки между экранами
   private towers: { images: Phaser.GameObjects.Image[]; sensor: MatterJS.BodyType; x: number; topY: number }[] = []
 
+  // параллакс-дома
+  private backHousesLayers: Phaser.GameObjects.Image[] = []
+  private backParallaxFactor = 0.6
+
+  // параллакс-кусты
+  private bushesLayers: Phaser.GameObjects.Image[] = []
+  private bushesParallaxFactor = 1
+
+  // --- облака ---
+  private clouds: Phaser.GameObjects.Image[] = []
+  private cloudSpeedPxPerMs = 0.045 // единая скорость для всех
+
   constructor() { super("GameScene") }
 
   preload() {
@@ -95,9 +108,15 @@ export class GameScene extends Phaser.Scene {
     this.load.image("enemy_head", "assets/enemyBow/head.png")
     this.load.image("enemy_body", "assets/enemyBow/body.png")
     this.load.image("enemy_leg",  "assets/enemyBow/leg.png")
+    // параллакс-фоны
+    this.load.image("backHouses", "assets/backHouses.png")
+    this.load.image("bushes", "assets/green.png")
+    // облака
+    this.load.image("cloud", "assets/cloud.png")
   }
 
   create() {
+    this.createBackground();
     this.screenW = this.scale.width
 
     // камера: большие границы вправо
@@ -108,18 +127,20 @@ export class GameScene extends Phaser.Scene {
     // UI
     this.addScoreUI()
 
-    // поверхность и первый «экран»
+    // поверхность и параллакс-фоны первого экрана
     this.createSurface(this.levelCenterX(this.currentLevel))
+    this.createBackHouses(this.levelCenterX(this.currentLevel))
+    this.createBushes(this.levelCenterX(this.currentLevel))
 
     // игрок
     this.player = this.createStickman(this.spawnX, this.spawnY)
 
-    // ДВЕ башни и ДВА врага на текущем экране
+    // две башни и два врага
     this.spawnTwoTowersAndEnemies(this.currentLevel)
 
     this.addInputHandlers()
 
-    // Удаление стрел, вонзившихся в землю, спустя время
+    // Удаление стрел, вонзившихся в землю
     this.matter.world.on('collisionstart', (event: any) => {
       for (const pair of event.pairs) {
         const bodyA: any = pair.bodyA
@@ -137,6 +158,29 @@ export class GameScene extends Phaser.Scene {
         if (isArrowB && isGroundA) this.stickAndScheduleRemove(goB as Phaser.Physics.Matter.Image)
       }
     })
+
+    // --- ОБЛАКА при старте сцены: 1–3 слева и 1–3 справа (все за кадром)
+    this.spawnCloudBatch("left", Phaser.Math.Between(1, 3))
+    this.spawnCloudBatch("right", Phaser.Math.Between(1, 3))
+  }
+
+  // GameScene.ts
+  createBackground() {
+    const { width, height } = this.scale;
+    const key = 'bgGradient';
+
+    const tex = this.textures.createCanvas(key, width, height);
+    const canvas = tex.getSourceImage() as HTMLCanvasElement;
+    const ctx = canvas.getContext('2d')!;
+
+    const grd = ctx.createLinearGradient(0, 0, 0, height);
+    grd.addColorStop(0, '#75c5dc');
+    grd.addColorStop(1, '#ffffff');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, width, height);
+    tex.refresh();
+
+    this.add.image(0, 0, key).setOrigin(0).setScrollFactor(0).setDepth(-6);
   }
 
   update() {
@@ -176,6 +220,9 @@ export class GameScene extends Phaser.Scene {
       if (a.x < -100 || a.x > this.screenW * 110 || a.y < -200 || a.y > 2200) { a.destroy(); return false }
       return true
     })
+
+    // --- облака: апдейт движения и очистка ---
+    this.updateClouds()
   }
 
   // ---------- helpers уровней/камеры ----------
@@ -363,14 +410,14 @@ export class GameScene extends Phaser.Scene {
       baseRightArmX: rightArm.x,
       isPulling: false,
       pullStrength: 0,
-      lastShotTime: 0,
+      // сначала кулдаун, потом выстрел
+      lastShotTime: Date.now(),
       shotCooldown: Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max),
       aimOffsetRad: 0,
       pullTarget: 1,
       isDying: false
     }
 
-    // сохраняем пивот как data, чтобы вращать верх отдельно для каждого
     ;(enemy as any).topPivot = enemyTopPivot
 
     this.resetEnemyBowstring(enemy)
@@ -389,7 +436,7 @@ export class GameScene extends Phaser.Scene {
 
   private updateEnemyBowstring(enemy: EnemyArcher) {
     const r = enemy.rightArm
-    const midX = r.x + 55 // 30 + 25
+    const midX = r.x + 55
     const midY = r.y - 60 + 13 / 2
     const g = enemy.bowstring
     g.clear().lineStyle(4, 0xffffff).beginPath()
@@ -414,7 +461,6 @@ export class GameScene extends Phaser.Scene {
     for (const enemy of this.enemies) {
       if (enemy.isDying) continue
 
-      // поворот верха (как в одиночном варианте)
       const dy = this.playerRoot.y - enemy.root.y
       const baseAimAngle = Phaser.Math.Clamp(dy * 0.0015, -0.8, 0.8)
       const topPivot = (enemy as any).topPivot as Phaser.GameObjects.Container
@@ -432,7 +478,6 @@ export class GameScene extends Phaser.Scene {
     enemy.aimOffsetRad = Phaser.Math.DEG_TO_RAD *
       Phaser.Math.FloatBetween(this.enemyAimOffsetRangeDeg.min, this.enemyAimOffsetRangeDeg.max)
     enemy.pullTarget = Phaser.Math.FloatBetween(this.enemyPullRange.min, this.enemyPullRange.max)
-    enemy.shotCooldown = Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max)
 
     this.tweens.killTweensOf(enemy.rightArm)
     enemy.rightArm.x = enemy.baseRightArmX
@@ -461,6 +506,7 @@ export class GameScene extends Phaser.Scene {
             enemy.isPulling = false
             enemy.pullStrength = 0
             enemy.lastShotTime = Date.now()
+            enemy.shotCooldown = Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max)
             this.resetEnemyBowstring(enemy)
           }
         })
@@ -480,7 +526,7 @@ export class GameScene extends Phaser.Scene {
 
     const spawnX = m.a * localX + m.c * localY + m.tx
     const spawnY = m.b * localX + m.d * localY + m.ty
-    const armAngle = Math.atan2(m.b, m.a) + Math.PI // влево
+    const armAngle = Math.atan2(m.b, m.a) + Math.PI
 
     const arrow = this.matter.add.image(spawnX, spawnY, "arrow")
     arrow.setScale(0.1).setRotation(armAngle)
@@ -512,6 +558,56 @@ export class GameScene extends Phaser.Scene {
     this.setupArrowSurfaceCollision(surf)
   }
 
+  // ---------- задний план (параллакс) ----------
+  private createBackHouses(centerX: number) {
+    const tex = this.textures.get("backHouses");
+    if (!tex || !tex.getSourceImage()) {
+      console.warn("[backHouses] texture missing or not loaded");
+      return;
+    }
+    const img = tex.getSourceImage() as HTMLImageElement;
+
+    const scale = (this.screenW * 1.8) / img.width; // шире экрана
+    const y = this.groundY+100; // нижний край почти у земли
+
+    const layer = this.add.image(centerX, y, "backHouses")
+      .setOrigin(0.5, 1)
+      .setScale(scale)
+      .setDepth(-5.9)                 // перед градиентом (-6), позади кустов/земли
+      .setScrollFactor(this.backParallaxFactor, 0); // параллакс только по X
+
+    this.backHousesLayers.push(layer);
+  }
+
+  private createBushes(centerX: number) {
+    const tex = this.textures.get("bushes");
+    if (!tex || !tex.getSourceImage()) {
+      console.warn("[bushes] texture missing or not loaded");
+      return;
+    }
+    const img = tex.getSourceImage() as HTMLImageElement;
+
+    const scale = (this.screenW * 1.2) / img.width; // немного шире домов
+    const y = this.groundY - 70;                      // чуть выше земли
+
+    const layer = this.add.image(centerX, y, "bushes")
+      .setOrigin(0.5, 1)
+      .setScale(scale)
+      .setDepth(-5.6)                 // между домами (-5.9) и surface (-5)
+      .setScrollFactor(this.bushesParallaxFactor, 0);
+
+    this.bushesLayers.push(layer);
+  }
+
+  private destroyBackHouses() {
+    for (const l of this.backHousesLayers) { try { l.destroy() } catch {} }
+    this.backHousesLayers = []
+  }
+  private destroyBushes() {
+    for (const l of this.bushesLayers) { try { l.destroy() } catch {} }
+    this.bushesLayers = []
+  }
+
   private stickAndScheduleRemove(arrow: Phaser.Physics.Matter.Image) {
     if (!arrow || !arrow.body || arrow.getData?.('stuck')) return
     arrow.setData?.('stuck', true)
@@ -534,9 +630,8 @@ export class GameScene extends Phaser.Scene {
     })
   }
 
-  // ---------- простая башня (3 куска) ----------
+  // ---------- простая башня (процедурная) ----------
   private createTowerAtPosition(x: number, groundY: number) {
-    // Процедурная башня как раньше: картинки без физики + один сенсор (чтобы не мешать стрелам)
     const scale = 0.6
 
     const getSize = (key: string) => {
@@ -574,7 +669,6 @@ export class GameScene extends Phaser.Scene {
     top.setScale(scale)
     images.push(top)
 
-    // Сенсор: не блокирует, нужен только для клипов/логики при желании
     const sensor = this.matter.add.rectangle(x, centerY, maxW, totalH, {
       isStatic: true,
       isSensor: true,
@@ -630,25 +724,22 @@ export class GameScene extends Phaser.Scene {
 
         ;(arrowBody as any).isFlying = false
 
-        // очки
         this.score += 1
         this.scoreText.setText(String(this.score))
 
-        // удалить стрелу
         const arrowGO = (arrowBody as any).gameObject as Phaser.Physics.Matter.Image
         if (arrowGO) {
           this.arrows = this.arrows.filter(a => a !== arrowGO)
           arrowGO.destroy()
         }
 
-        // смерть конкретного врага
-        this.killEnemyWithDelay(enemy, 350)
+        this.killEnemyWithDelay(enemy, 350);
       })
     }
     this.matter.world.on("collisionstart", handler as any)
   }
 
-  // ---------- смерть врага и переход на новый экран, когда оба мертвы ----------
+  // ---------- смерть врага и переход на новый экран ----------
   private killEnemyWithDelay(enemy: EnemyArcher, fadeDelayMs: number) {
     if (enemy.isDying) return
     enemy.isDying = true
@@ -668,7 +759,6 @@ export class GameScene extends Phaser.Scene {
         enemy.root.destroy(true)
         this.matter.world.remove(enemy.bodyPhysics)
         this.enemies = this.enemies.filter(e => e !== enemy)
-        // если все враги на экране мертвы — двигаемся дальше
         if (this.enemies.length === 0) this.advanceToNextScreen()
       }
     })
@@ -684,15 +774,30 @@ export class GameScene extends Phaser.Scene {
 
     this.panToLevel(this.currentLevel, 600)
 
+    // пересоздаём основу уровня
     this.createSurface(this.levelCenterX(this.currentLevel))
 
-    // очистить башни прошлого экрана (на всякий случай)
+    // пересоздаём параллакс-слои (очистка + создание)
+    this.createBackHouses(this.levelCenterX(this.currentLevel))
+    this.createBushes(this.levelCenterX(this.currentLevel))
+
+    // очистить башни прошлого экрана
     this.destroyTowers()
 
     // СПАВН: две башни и два врага на новом экране
     this.spawnTwoTowersAndEnemies(this.currentLevel)
 
-    const bob = this.tweens.add({ targets: this.playerRoot, y: this.playerRoot.y - 6, duration: 180, yoyo: true, repeat: -1, ease: "Sine.InOut" })
+    // добавляем ещё 1–3 облака (случайная сторона), сразу — даже во время движения
+    this.spawnCloudBatch("random", Phaser.Math.Between(1, 3))
+
+    const bob = this.tweens.add({
+      targets: this.playerRoot,
+      y: this.playerRoot.y - 6,
+      duration: 180,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.InOut"
+    })
 
     this.tweens.add({
       targets: this.playerRoot,
@@ -740,10 +845,92 @@ export class GameScene extends Phaser.Scene {
     const t1 = this.createTowerAtPosition(tower1X, towerYGround)
     const t2 = this.createTowerAtPosition(tower2X, towerYGround)
 
-    // ставим врагов на крыши (небольшой запас вниз от топ-края)
+    // ставим врагов на крыши
     const e1 = this.createEnemyArcher(t1.x, t1.topY)
     const e2 = this.createEnemyArcher(t2.x, t2.topY)
 
     this.enemies.push(e1, e2)
+  }
+
+  // ===================== ОБЛАКА =====================
+
+  // Пакетный спавн N облаков со стороной
+  private spawnCloudBatch(side: "left" | "right" | "random", count: number) {
+    for (let i = 0; i < count; i++) {
+      const s = side === "random" ? (Math.random() < 0.5 ? "left" : "right") : side
+      this.spawnCloud(s)
+    }
+  }
+
+  // Создание одного облака строго за левым/правым краем
+  private spawnCloud(side: "left" | "right") {
+    const cam = this.cameras.main
+
+    // случайный масштаб (для разнообразия визуала)
+    const scale = Phaser.Math.FloatBetween(0.7, 1.25)
+
+    // реальная ширина для корректного спавна "за кадром"
+    const tex = this.textures.get("cloud").getSourceImage() as HTMLImageElement
+    const nativeW = tex ? tex.width : 256
+    const displayW = nativeW * scale
+    const margin = 40
+    const extra = Phaser.Math.Between(50, 400) // чуть дальше за краем
+
+    // X строго за пределами видимой области
+    const startX = side === "left"
+      ? cam.scrollX - (displayW / 2) - margin - extra
+      : cam.scrollX + this.scale.width + (displayW / 2) + margin + extra
+
+    // Y случайный в «небе»
+    const startY = Phaser.Math.Between(120, 460)
+
+    const cloud = this.add.image(startX, startY, "cloud")
+      .setOrigin(0.5, 0.5)
+      .setScale(scale)         // ВАЖНО: один раз, без перезаписи 0.2
+      .setAlpha(0.9)
+      .setDepth(-5.95)         // между градиентом (-6) и домами (-5.9)
+      .setScrollFactor(0.45, 0) // лёгкий параллакс
+
+    // единая скорость для всех облаков
+    cloud.setData("speed", this.cloudSpeedPxPerMs)
+
+    // лёгкое «дыхание» по Y
+    cloud.setData("vyAmp", Phaser.Math.FloatBetween(0, 8))
+    cloud.setData("vyFreq", Phaser.Math.FloatBetween(0.001, 0.003))
+    cloud.setData("t0", this.time.now)
+
+    this.clouds.push(cloud)
+  }
+
+  private updateClouds() {
+    if (this.clouds.length === 0) return
+    const cam = this.cameras.main
+    const rightKillX = cam.scrollX + this.scale.width + 260
+    const leftKillX  = cam.scrollX - 260
+    const delta = this.game.loop.delta // мс
+
+    for (let i = this.clouds.length - 1; i >= 0; i--) {
+      const c = this.clouds[i]
+      if (!c.scene) { this.clouds.splice(i, 1); continue }
+
+      // движение всех облаков вправо (единая скорость)
+      const vx = (c.getData("speed") as number) || this.cloudSpeedPxPerMs
+      c.x += vx * delta
+
+      // лёгкое «дыхание»
+      const amp = (c.getData("vyAmp") as number) || 0
+      const freq = (c.getData("vyFreq") as number) || 0
+      const t0 = (c.getData("t0") as number) || 0
+      if (amp > 0 && freq > 0) {
+        const t = this.time.now - t0
+        c.y += Math.sin(t * freq) * 0.15 * (amp / 8)
+      }
+
+      // удаляем далеко за краями
+      if (c.x > rightKillX || c.x < leftKillX - 400) {
+        c.destroy()
+        this.clouds.splice(i, 1)
+      }
+    }
   }
 }

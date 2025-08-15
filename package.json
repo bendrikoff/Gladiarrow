@@ -1,7 +1,7 @@
 {
-  "name": "GAME_NAME",
+  "name": "Gladiarrow",
   "version": "1.0.0",
-  "description": "GAME_NAME game for Farcade platform",
+  "description": "Gladiarrow",
   "type": "module",
   "scripts": {
     "remix-setup": "node scripts/setup.js",
@@ -26,7 +26,7 @@
     "qrcode-terminal": "^0.12.0",
     "typescript": "^5.8.2",
     "vite": "^6.2.3"
-  },
+    },
   "dependencies": {
     "phaser": "^3.88.2"
   }

@@ -1,32 +1,14 @@
-import { defineConfig } from "vite"
-import path from "path"
+import { defineConfig } from 'vite'
+import path from 'path'
 
 export default defineConfig({
-  server: {
-    host: true,
-    open: true,
-  },
   build: {
-    outDir: "dist",
-    assetsDir: "assets",
-    emptyOutDir: true,
-    minify: false,
-    rollupOptions: {
-      external: ["phaser"],
-      output: {
-        globals: {
-          phaser: "Phaser",
-        },
-      },
-    },
+    outDir: 'dist',
+    emptyOutDir: true
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "src"),
-    },
-  },
-  publicDir: "public",
-  optimizeDeps: {
-    exclude: ["phaser"],
-  },
+      '@': path.resolve(__dirname, 'src')
+    }
+  }
 })

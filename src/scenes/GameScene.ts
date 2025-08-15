@@ -1,3 +1,4 @@
+
 // --- враги (мульти) ---
 type EnemyArcher = {
   root: Phaser.GameObjects.Container
@@ -93,7 +94,6 @@ export class GameScene extends Phaser.Scene {
   constructor() { super("GameScene") }
 
   preload() {
-    // игрок
     this.load.image("bow", "assets/player/bow.png")
     this.load.image("arrow", "assets/player/arrow.png")
     this.load.image("head", "assets/player/head.png")

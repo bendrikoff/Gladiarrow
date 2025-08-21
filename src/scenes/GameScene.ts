@@ -1,4 +1,3 @@
-
 // --- враги (мульти) ---
 type EnemyArcher = {
   root: Phaser.GameObjects.Container
@@ -20,6 +19,28 @@ type EnemyArcher = {
   aimOffsetRad: number
   pullTarget: number
   isDying: boolean
+}
+
+type EnemySwordsman = {
+  root: Phaser.GameObjects.Container
+  head: Phaser.GameObjects.Image
+  body: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
+  leftArm: Phaser.GameObjects.Graphics
+  rightArm: Phaser.GameObjects.Graphics
+  leftLeg: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
+  rightLeg: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics
+  sword: Phaser.GameObjects.Image
+  bodyPhysics: MatterJS.BodyType
+  swordPhysics: MatterJS.BodyType
+  // movement
+  walkSpeed: number
+  isWalking: boolean
+  isDying: boolean
+  // combat
+  isAttacking: boolean
+  attackCooldown: number
+  lastAttackTime: number
+  attackRange: number
 }
 
 export class GameScene extends Phaser.Scene {
@@ -59,11 +80,12 @@ export class GameScene extends Phaser.Scene {
   private spawnY = 1175
 
   private enemies: EnemyArcher[] = []
+  private swordsmen: EnemySwordsman[] = []
 
   // AI диапазоны
-  private enemyShotCooldownRange = { min: 900, max: 1600 } // мс
-  private enemyAimOffsetRangeDeg = { min: -60, max: 10 }   // градусы
-  private enemyPullRange = { min: 0.5, max: 3.5 }          // сила (|dx|/20)
+  private enemyShotCooldownRange = { min: 2500, max: 2500 } // мс
+  private enemyAimOffsetRangeDeg = { min: -80, max: 10 }   // градусы
+  private enemyPullRange = { min: 0.1, max: 5.0 }          // сила (|dx|/20)
 
   // якоря тетивы врага (лук влево)
   private enemyStringTop    = new Phaser.Math.Vector2(-65, -75)
@@ -72,6 +94,11 @@ export class GameScene extends Phaser.Scene {
   // --- счёт ---
   private score = 0
   private scoreText!: Phaser.GameObjects.Text
+
+  // --- здоровье ---
+  private maxHealth = 3
+  private currentHealth = 3
+  private hearts: Phaser.GameObjects.Image[] = []
 
   // поверхность
   private surface!: Phaser.Physics.Matter.Image
@@ -86,10 +113,6 @@ export class GameScene extends Phaser.Scene {
   // параллакс-кусты
   private bushesLayers: Phaser.GameObjects.Image[] = []
   private bushesParallaxFactor = 1
-
-  // --- облака ---
-  private clouds: Phaser.GameObjects.Image[] = []
-  private cloudSpeedPxPerMs = 0.045 // единая скорость для всех
 
   constructor() { super("GameScene") }
 
@@ -108,11 +131,13 @@ export class GameScene extends Phaser.Scene {
     this.load.image("enemy_head", "assets/enemyBow/head.png")
     this.load.image("enemy_body", "assets/enemyBow/body.png")
     this.load.image("enemy_leg",  "assets/enemyBow/leg.png")
+    // мечник
+    this.load.image("sword", "assets/player/sword.png")
+    // сердце для здоровья
+    this.load.image("heart", "assets/heart.png")
     // параллакс-фоны
     this.load.image("backHouses", "assets/backHouses.png")
     this.load.image("bushes", "assets/green.png")
-    // облака
-    this.load.image("cloud", "assets/cloud.png")
   }
 
   create() {
@@ -137,6 +162,9 @@ export class GameScene extends Phaser.Scene {
 
     // две башни и два врага
     this.spawnTwoTowersAndEnemies(this.currentLevel)
+    
+    // мечники
+    this.spawnSwordsmen(this.currentLevel)
 
     this.addInputHandlers()
 
@@ -147,21 +175,74 @@ export class GameScene extends Phaser.Scene {
         const bodyB: any = pair.bodyB
         const goA = bodyA?.gameObject
         const goB = bodyB?.gameObject
+    
+        // 1) СНАЧАЛА случаи без gameObject (игрок — чистое тело)
+        // Стрелы врагов попадают в игрока
+        if ((goA?.texture?.key === 'arrow' && bodyB === this.player.bodyPhysics && bodyA.owner === 'enemy')
+         || (goB?.texture?.key === 'arrow' && bodyA === this.player.bodyPhysics && bodyB.owner === 'enemy')) {
+    
+          this.takeDamage(1)
+    
+          const arrowBody = goA?.texture?.key === 'arrow' ? bodyA : bodyB
+          const arrowGO   = (arrowBody as any).gameObject as Phaser.Physics.Matter.Image
+    
+          if ((arrowBody as any).isFlying) {
+            const MatterLib = (Phaser.Physics.Matter as any).Matter
+            const Body = MatterLib.Body
+            Body.setVelocity(arrowBody, { x: 0, y: 0 })
+            Body.set(arrowBody, 'angularVelocity', 0)
+            Body.setStatic(arrowBody, true)
+          }
+          arrowGO?.destroy()
+          continue  // уже обработали пару
+        }
+    
+        // 2) Далее, всё, что требует обоих gameObject
         if (!goA || !goB) continue
-
+    
         const isArrowA = goA.texture?.key === 'arrow'
         const isArrowB = goB.texture?.key === 'arrow'
         const isGroundA = goA.texture?.key === 'surface' || goA.getData?.('isGround')
         const isGroundB = goB.texture?.key === 'surface' || goB.getData?.('isGround')
-
+    
+        // Стрелы игрока в землю
         if (isArrowA && isGroundB) this.stickAndScheduleRemove(goA as Phaser.Physics.Matter.Image)
         if (isArrowB && isGroundA) this.stickAndScheduleRemove(goB as Phaser.Physics.Matter.Image)
+        
+        // Стрелы игрока попадают во врагов (лучников)
+        if (isArrowA && (bodyB as any).gameObject && (bodyA as any).owner === 'player') {
+          const enemyBody = bodyB as any
+          if (enemyBody.gameObject && enemyBody.gameObject.texture?.key === 'enemy_body') {
+            // Останавливаем стрелу игрока при попадании во врага
+            const arrowBody = bodyA as any
+            if (arrowBody.isFlying) {
+              arrowBody.isFlying = false
+              const MatterLib = (Phaser.Physics.Matter as any).Matter
+              const Body = MatterLib.Body
+              Body.setVelocity(arrowBody, { x: 0, y: 0 })
+              Body.set(arrowBody, 'angularVelocity', 0)
+              Body.setStatic(arrowBody, true)
+            }
+            goA.destroy()
+          }
+        } else if (isArrowB && (bodyA as any).gameObject && (bodyB as any).owner === 'player') {
+          const enemyBody = bodyA as any
+          if (enemyBody.gameObject && enemyBody.gameObject.texture?.key === 'enemy_body') {
+            // Останавливаем стрелу игрока при попадании во врага
+            const arrowBody = bodyB as any
+            if (arrowBody.isFlying) {
+              arrowBody.isFlying = false
+              const MatterLib = (Phaser.Physics.Matter as any).Matter
+              const Body = MatterLib.Body
+              Body.setVelocity(arrowBody, { x: 0, y: 0 })
+              Body.set(arrowBody, 'angularVelocity', 0)
+              Body.setStatic(arrowBody, true)
+            }
+            goB.destroy()
+          }
+        }
       }
     })
-
-    // --- ОБЛАКА при старте сцены: 1–3 слева и 1–3 справа (все за кадром)
-    this.spawnCloudBatch("left", Phaser.Math.Between(1, 3))
-    this.spawnCloudBatch("right", Phaser.Math.Between(1, 3))
   }
 
   // GameScene.ts
@@ -170,6 +251,7 @@ export class GameScene extends Phaser.Scene {
     const key = 'bgGradient';
 
     const tex = this.textures.createCanvas(key, width, height);
+    if (!tex) return;
     const canvas = tex.getSourceImage() as HTMLCanvasElement;
     const ctx = canvas.getContext('2d')!;
 
@@ -186,9 +268,19 @@ export class GameScene extends Phaser.Scene {
   update() {
     if (!this.player) return
 
+    // Синхронизируем физическое тело игрока с визуальным объектом
+    if (this.player.bodyPhysics && this.playerRoot) {
+      const MatterLib = (Phaser.Physics.Matter as any).Matter
+      const Body = MatterLib.Body
+      Body.setPosition(this.player.bodyPhysics, { 
+        x: this.playerRoot.x, 
+        y: this.playerRoot.y 
+      })
+    }
+
     // поворот стрел по скорости
     for (const arrow of this.arrows) {
-      if (!arrow || !arrow.body || arrow.destroyed) continue
+      if (!arrow || !arrow.body || !arrow.scene) continue
       const body = arrow.body as MatterJS.BodyType
       if (body?.velocity) {
         const { x: vx, y: vy } = body.velocity
@@ -213,16 +305,16 @@ export class GameScene extends Phaser.Scene {
 
     // враги — прицел и тайминг
     this.updateEnemiesAI()
+    
+    // мечники — движение
+    this.updateSwordsmenAI()
 
     // подчистка стрел
     this.arrows = this.arrows.filter(a => {
-      if (!a || !a.body || a.destroyed) return false
+      if (!a || !a.body || !a.scene) return false
       if (a.x < -100 || a.x > this.screenW * 110 || a.y < -200 || a.y > 2200) { a.destroy(); return false }
       return true
     })
-
-    // --- облака: апдейт движения и очистка ---
-    this.updateClouds()
   }
 
   // ---------- helpers уровней/камеры ----------
@@ -245,6 +337,63 @@ export class GameScene extends Phaser.Scene {
       strokeThickness: 6
     }).setOrigin(0.5, 0).setDepth(1000)
     this.scoreText.setScrollFactor(0)
+
+    // Добавляем сердца здоровья
+    this.addHealthUI()
+  }
+
+  private addHealthUI() {
+    const heartSize = 100
+    const startX = this.scale.width  - this.maxHealth * heartSize 
+    const startY = 20
+
+    for (let i = 0; i < this.maxHealth; i++) {
+      const heart = this.add.image(startX + i * (heartSize * 0.8), startY, "heart")
+        .setDisplaySize(heartSize, heartSize * 1.5)
+        .setOrigin(0, 0)
+        .setDepth(1000)
+        .setScrollFactor(0)
+      
+      this.hearts.push(heart)
+    }
+  }
+
+  private takeDamage(amount: number = 1) {
+    this.currentHealth = Math.max(0, this.currentHealth - amount)
+    this.updateHealthUI()
+    
+    if (this.currentHealth <= 0) {
+      this.gameOver()
+    }
+  }
+
+  private heal(amount: number = 1) {
+    this.currentHealth = Math.min(this.maxHealth, this.currentHealth + amount)
+    this.updateHealthUI()
+  }
+
+  private updateHealthUI() {
+    for (let i = 0; i < this.hearts.length; i++) {
+      if (i < this.currentHealth) {
+        this.hearts[i].setVisible(true)
+      } else {
+        this.hearts[i].setVisible(false)
+      }
+    }
+  }
+
+  private gameOver() {
+    // Останавливаем игру
+    this.scene.pause()
+    
+    // Показываем сообщение о конце игры
+    this.add.text(this.scale.width / 2, this.scale.height / 2, "GAME OVER", {
+      fontFamily: "Arial",
+      fontSize: "64px",
+      color: "#ff0000",
+      stroke: "#000000",
+      strokeThickness: 8
+    }).setOrigin(0.5).setDepth(1001).setScrollFactor(0)
   }
 
   // ---------- игрок ----------
@@ -283,7 +432,13 @@ export class GameScene extends Phaser.Scene {
     topParts.x = -cX
     topParts.y = -cY
 
-    const bodyPhysics = this.matter.add.rectangle(x, y, 60, 160, { isStatic: true })
+    const bodyPhysics = this.matter.add.rectangle(x, y, 60, 160, { 
+      isStatic: true
+    })
+    // Настраиваем категории коллизий через Matter.js API
+    const MatterLib = (Phaser.Physics.Matter as any).Matter
+    const Body = MatterLib.Body
+    Body.set(bodyPhysics, 'collisionFilter', { category: 0x0001, mask: 0x0002 })
     return { root, head, body: body as any, leftArm, rightArm, leftLeg: leftLeg as any, rightLeg: rightLeg as any, bowstring, bodyPhysics }
   }
 
@@ -332,8 +487,17 @@ export class GameScene extends Phaser.Scene {
 
     const arrow = this.matter.add.image(spawnX, spawnY, "arrow")
     arrow.setScale(0.1).setRotation(armAngle)
-    arrow.setBody({ type: "rectangle", width: 40, height: 6 })
+    arrow.setBody({ 
+      type: "rectangle", 
+      width: 40, 
+      height: 6
+    })
     arrow.setMass(1)
+    
+    // Настраиваем категории коллизий через Matter.js API
+    const MatterLib = (Phaser.Physics.Matter as any).Matter
+    const Body = MatterLib.Body
+    Body.set(arrow.body, 'collisionFilter', { category: 0x0002, mask: 0x0001 })
 
     const v = this.pullStrength * 15
     arrow.setVelocity(Math.cos(armAngle) * v, Math.sin(armAngle) * v)
@@ -410,7 +574,6 @@ export class GameScene extends Phaser.Scene {
       baseRightArmX: rightArm.x,
       isPulling: false,
       pullStrength: 0,
-      // сначала кулдаун, потом выстрел
       lastShotTime: Date.now(),
       shotCooldown: Phaser.Math.Between(this.enemyShotCooldownRange.min, this.enemyShotCooldownRange.max),
       aimOffsetRad: 0,
@@ -530,8 +693,17 @@ export class GameScene extends Phaser.Scene {
 
     const arrow = this.matter.add.image(spawnX, spawnY, "arrow")
     arrow.setScale(0.1).setRotation(armAngle)
-    arrow.setBody({ type: "rectangle", width: 40, height: 6 })
+    arrow.setBody({ 
+      type: "rectangle", 
+      width: 40, 
+      height: 6
+    })
     arrow.setMass(1)
+    
+    // Настраиваем категории коллизий через Matter.js API
+    const MatterLib = (Phaser.Physics.Matter as any).Matter
+    const Body = MatterLib.Body
+    Body.set(arrow.body, 'collisionFilter', { category: 0x0002, mask: 0x0001 })
 
     const velocity = pull * 15
     arrow.setVelocity(Math.cos(armAngle) * velocity, Math.sin(armAngle) * velocity)
@@ -541,6 +713,155 @@ export class GameScene extends Phaser.Scene {
     ;(arrow.body as any).owner = 'enemy'
 
     this.arrows.push(arrow)
+  }
+
+  // ---------- мечники ----------
+  private createEnemySwordsman(x: number, y: number): EnemySwordsman {
+    // Меч (начальная поза не важна — приклеим в апдейте)
+    const sword = this.add.image(-55, -65, "sword")
+    sword.setScale(0.15)
+
+    // ПРАВАЯ рука держит рукоять меча (горизонтально)
+    const rightArm = this.add.graphics()
+    rightArm.fillStyle(0x613e26, 1).fillRoundedRect(-60, -35, 50, 13, 5)
+    rightArm.rotation = Math.PI / 2
+
+    // ЛЕВАЯ рука поддерживает меч (вертикально у тела)
+    const leftArm = this.add.graphics()
+    leftArm.fillStyle(0x613e26, 1).fillRoundedRect(-50, -45, 50, 13, 5)
+    leftArm.rotation = 0
+
+    const head = this.add.image(0, -90, "enemy_head").setDisplaySize(100, 100)
+    const body = this.add.image(5, -30, "enemy_body").setDisplaySize(60, 60)
+    const leftLeg = this.add.image(-10, 5, "enemy_leg").setDisplaySize(20, 20)
+    const rightLeg = this.add.image(20, 5, "enemy_leg").setDisplaySize(20, 20)
+
+    const root = this.add.container(x, y, [head, leftLeg, rightLeg, body, leftArm, rightArm, sword])
+
+    // статические физтела
+    const bodyPhysics = this.matter.add.rectangle(x, y - 50, 60, 160, { isStatic: true })
+    const swordPhysics = this.matter.add.rectangle(x - 55, y - 65, 40, 80, { isStatic: true, isSensor: true })
+    ;(bodyPhysics as any).ignoreGravity = true
+    ;(swordPhysics as any).ignoreGravity = true
+
+    const swordsman: EnemySwordsman = {
+      root, head, body: body as any, leftArm, rightArm,
+      leftLeg: leftLeg as any, rightLeg: rightLeg as any,
+      sword, bodyPhysics, swordPhysics,
+      walkSpeed: Phaser.Math.FloatBetween(0.8, 1.2),
+      isWalking: true,
+      isDying: false,
+      isAttacking: false,
+      attackCooldown: 2000,
+      lastAttackTime: 0,
+      attackRange: 120
+    }
+
+    this.setupArrowSwordsmanCollision(swordsman)
+    this.setupSwordPlayerCollision(swordsman)
+    return swordsman
+  }
+
+  private attachSwordToLeftHand(s: EnemySwordsman) {
+    const arm = s.leftArm as any
+    const mArm = arm.getWorldTransformMatrix()
+  
+    // точка хвата на руке (подгони под прямоугольник руки)
+    const gripLX = -45
+    const gripLY = -65
+  
+    // мировые координаты хвата
+    const worldX = mArm.a * gripLX + mArm.c * gripLY + mArm.tx
+    const worldY = mArm.b * gripLX + mArm.d * gripLY + mArm.ty
+  
+    // локальные координаты внутри root — для спрайта меча
+    const root = s.root as any
+    const mRoot = root.getWorldTransformMatrix()
+    const local = new Phaser.Math.Vector2()
+    mRoot.applyInverse(worldX, worldY, local)
+  
+    // угол руки в мире
+    const armAngle = Math.atan2(mArm.b, mArm.a)
+    const SWORD_ROT_OFFSET = 0
+  
+    // визуал
+    s.sword.x = local.x
+    s.sword.y = local.y
+    s.sword.rotation = armAngle + SWORD_ROT_OFFSET
+  
+    // физика
+    const MatterLib = (Phaser.Physics.Matter as any).Matter
+    const Body = MatterLib.Body
+    Body.setPosition(s.swordPhysics, { x: worldX, y: worldY })
+    Body.setAngle(s.swordPhysics, s.sword.rotation)
+  }
+  
+  private updateSwordsmenAI() {
+    if (!this.playerRoot) return
+  
+    const delta = this.game.loop.delta
+    const now = Date.now()
+  
+    for (let i = this.swordsmen.length - 1; i >= 0; i--) {
+      const s = this.swordsmen[i]
+      if (s.isDying) continue
+  
+      const distanceToPlayer = Math.abs(s.root.x - this.playerRoot.x)
+  
+      if (!s.isAttacking) {
+        // идём, пока не началась атака
+        s.isWalking = true
+  
+        // движение к игроку (слева направо не идём, нам нужно смещение влево)
+        const moveSpeed = s.walkSpeed * delta * 0.1
+        s.root.x -= moveSpeed
+  
+        // синк физтела
+        const MatterLib = (Phaser.Physics.Matter as any).Matter
+        const Body = MatterLib.Body
+        Body.setPosition(s.bodyPhysics, { x: s.root.x, y: s.root.y - 50 })
+  
+        // походка
+        this.animateSwordsmanWalking(s, delta)
+  
+
+  
+        // вышел за экран — удалить
+        if (s.root.x < this.cameras.main.scrollX - 200) {
+          s.root.destroy(true)
+          this.matter.world.remove(s.bodyPhysics)
+          this.matter.world.remove(s.swordPhysics)
+          this.swordsmen.splice(i, 1)
+          continue
+        }
+      } else {
+        // в фазе атаки стоим
+        s.isWalking = false
+      }
+  
+      // меч всегда приклеен к ЛЕВОЙ руке
+      this.attachSwordToLeftHand(s)
+    }
+  }
+  
+
+
+
+
+  private animateSwordsmanWalking(s: EnemySwordsman, _delta: number) {
+    const t = this.time.now * 0.005
+    s.leftLeg.rotation = Math.sin(t) * 0.3
+    s.rightLeg.rotation = Math.sin(t + Math.PI) * 0.3
+    
+    // ПРАВАЯ рука (держит меч) — почти фикс, лёгкое покачивание
+    const rightArmT = t * 1.2
+    s.rightArm.rotation = Math.PI / 2 + Math.sin(rightArmT) * 0.07
+    
+    // ЛЕВАЯ рука — свободнее качается
+    const leftArmT = t * 1.6
+    s.leftArm.rotation = 0 + Math.sin(leftArmT) * 0.12
+
+    // меч не трогаем — он приклеен к правой руке в attachSwordToRightHand()
   }
 
   // ---------- поверхность ----------
@@ -683,11 +1004,12 @@ export class GameScene extends Phaser.Scene {
 
   // ---------- коллизии ----------
   private setupArrowSurfaceCollision(surface: Phaser.Physics.Matter.Image) {
-    const Body = Phaser.Physics.Matter.Matter.Body
+    const MatterLib = (Phaser.Physics.Matter as any).Matter
+    const Body = MatterLib.Body
     const surfaceBody = surface.body as MatterJS.BodyType
 
-    this.matter.world.on("collisionstart", (event: MatterJS.ICollisionStartEvent) => {
-      event.pairs.forEach(pair => {
+    this.matter.world.on("collisionstart", (event: any) => {
+      event.pairs.forEach((pair: any) => {
         let arrowBody: MatterJS.BodyType | null = null
         if (pair.bodyA === surfaceBody && (pair.bodyB as any).isArrow) {
           arrowBody = pair.bodyB
@@ -709,8 +1031,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupArrowEnemyCollision(enemy: EnemyArcher) {
-    const handler = (event: MatterJS.ICollisionStartEvent) => {
-      event.pairs.forEach(pair => {
+    const handler = (event: any) => {
+      event.pairs.forEach((pair: any) => {
         let arrowBody: MatterJS.BodyType | null = null
         let hitEnemy = false
         if ((pair.bodyA as any).isArrow && pair.bodyB === enemy.bodyPhysics) {
@@ -739,6 +1061,37 @@ export class GameScene extends Phaser.Scene {
     this.matter.world.on("collisionstart", handler as any)
   }
 
+  private setupArrowSwordsmanCollision(swordsman: EnemySwordsman) {
+    const handler = (event: any) => {
+      event.pairs.forEach((pair: any) => {
+        let arrowBody: MatterJS.BodyType | null = null
+        let hitSwordsman = false
+        if ((pair.bodyA as any).isArrow && pair.bodyB === swordsman.bodyPhysics) {
+          arrowBody = pair.bodyA; hitSwordsman = true
+        } else if ((pair.bodyB as any).isArrow && pair.bodyA === swordsman.bodyPhysics) {
+          arrowBody = pair.bodyB; hitSwordsman = true
+        }
+        if (!hitSwordsman || !arrowBody || swordsman.isDying) return
+        if ((arrowBody as any).owner !== 'player') return
+        if (!(arrowBody as any).isFlying) return
+
+        ;(arrowBody as any).isFlying = false
+
+        this.score += 1
+        this.scoreText.setText(String(this.score))
+
+        const arrowGO = (arrowBody as any).gameObject as Phaser.Physics.Matter.Image
+        if (arrowGO) {
+          this.arrows = this.arrows.filter(a => a !== arrowGO)
+          arrowGO.destroy()
+        }
+
+        this.killSwordsmanWithDelay(swordsman, 350);
+      })
+    }
+    this.matter.world.on("collisionstart", handler as any)
+  }
+
   // ---------- смерть врага и переход на новый экран ----------
   private killEnemyWithDelay(enemy: EnemyArcher, fadeDelayMs: number) {
     if (enemy.isDying) return
@@ -759,9 +1112,52 @@ export class GameScene extends Phaser.Scene {
         enemy.root.destroy(true)
         this.matter.world.remove(enemy.bodyPhysics)
         this.enemies = this.enemies.filter(e => e !== enemy)
-        if (this.enemies.length === 0) this.advanceToNextScreen()
+        if (this.enemies.length === 0 && this.swordsmen.length === 0) this.advanceToNextScreen()
       }
     })
+  }
+
+  private killSwordsmanWithDelay(swordsman: EnemySwordsman, fadeDelayMs: number) {
+    if (swordsman.isDying) return
+    swordsman.isDying = true
+
+    swordsman.isWalking = false
+
+    this.tweens.add({ targets: swordsman.root, scaleX: 1.08, scaleY: 0.92, duration: 120, yoyo: true, ease: "Quad.Out" })
+
+    this.tweens.add({
+      targets: swordsman.root,
+      alpha: 0,
+      delay: fadeDelayMs,
+      duration: 300,
+      ease: "Quad.In",
+      onComplete: () => {
+        swordsman.root.destroy(true)
+        this.matter.world.remove(swordsman.bodyPhysics)
+        this.matter.world.remove(swordsman.swordPhysics)
+        this.swordsmen = this.swordsmen.filter(s => s !== swordsman)
+        if (this.enemies.length === 0 && this.swordsmen.length === 0) this.advanceToNextScreen()
+      }
+    })
+  }
+
+  private setupSwordPlayerCollision(swordsman: EnemySwordsman) {
+    const handler = (event: any) => {
+      event.pairs.forEach((pair: any) => {
+        let hitPlayer = false
+        if (pair.bodyA === swordsman.swordPhysics && pair.bodyB === this.player.bodyPhysics) {
+          hitPlayer = true
+        } else if (pair.bodyB === swordsman.swordPhysics && pair.bodyA === this.player.bodyPhysics) {
+          hitPlayer = true
+        }
+        if (!hitPlayer || swordsman.isDying || !swordsman.isAttacking) return
+
+        // Игрок получает урон от меча только во время "окна удара"
+        console.log("Игрок получил урон от мечника!")
+        this.takeDamage(1)
+      })
+    }
+    this.matter.world.on("collisionstart", handler as any)
   }
 
   private advanceToNextScreen() {
@@ -769,6 +1165,9 @@ export class GameScene extends Phaser.Scene {
     this.startRound()
     this.isPlayerMoving = true
     this.currentLevel += 1
+
+    // Восстанавливаем здоровье при переходе на новый уровень
+    this.heal(this.maxHealth)
 
     const targetPlayerX = this.levelLeftX(this.currentLevel) + 100
 
@@ -786,9 +1185,9 @@ export class GameScene extends Phaser.Scene {
 
     // СПАВН: две башни и два врага на новом экране
     this.spawnTwoTowersAndEnemies(this.currentLevel)
-
-    // добавляем ещё 1–3 облака (случайная сторона), сразу — даже во время движения
-    this.spawnCloudBatch("random", Phaser.Math.Between(1, 3))
+    
+    // СПАВН: мечники справа
+    this.spawnSwordsmen(this.currentLevel)
 
     const bob = this.tweens.add({
       targets: this.playerRoot,
@@ -804,6 +1203,17 @@ export class GameScene extends Phaser.Scene {
       x: targetPlayerX,
       duration: Math.max(500, Math.abs(targetPlayerX - this.playerRoot.x) * 1.2),
       ease: "Quad.Out",
+      onUpdate: () => {
+        // Синхронизируем физическое тело игрока с визуальным объектом
+        if (this.player && this.player.bodyPhysics) {
+          const MatterLib = (Phaser.Physics.Matter as any).Matter
+          const Body = MatterLib.Body
+          Body.setPosition(this.player.bodyPhysics, { 
+            x: this.playerRoot.x, 
+            y: this.playerRoot.y 
+          })
+        }
+      },
       onComplete: () => { bob.stop(); this.isPlayerMoving = false }
     })
   }
@@ -814,6 +1224,16 @@ export class GameScene extends Phaser.Scene {
     if (this.player && this.player.leftArm) this.player.leftArm.x = 0
     this.pullStrength = 0
     this.resetBowstring()
+    
+    // Синхронизируем физическое тело игрока
+    if (this.player && this.player.bodyPhysics) {
+      const MatterLib = (Phaser.Physics.Matter as any).Matter
+      const Body = MatterLib.Body
+      Body.setPosition(this.player.bodyPhysics, { 
+        x: this.playerRoot.x, 
+        y: this.playerRoot.y 
+      })
+    }
   }
 
   // очистка всех сгенерированных башен
@@ -836,101 +1256,54 @@ export class GameScene extends Phaser.Scene {
     }
     this.enemies = []
 
-    // две башни у правого края экрана, с зазором
+    // первая башня всегда создается (дальняя)
     const right = this.levelRightX(level)
     const towerYGround = 1200
-    const tower1X = right - 360
-    const tower2X = right - 120
+    const tower1X = right - 120
 
     const t1 = this.createTowerAtPosition(tower1X, towerYGround)
-    const t2 = this.createTowerAtPosition(tower2X, towerYGround)
 
-    // ставим врагов на крыши
+    // ставим первого врага на крышу
     const e1 = this.createEnemyArcher(t1.x, t1.topY)
-    const e2 = this.createEnemyArcher(t2.x, t2.topY)
+    this.enemies.push(e1)
 
-    this.enemies.push(e1, e2)
-  }
-
-  // ===================== ОБЛАКА =====================
-
-  // Пакетный спавн N облаков со стороной
-  private spawnCloudBatch(side: "left" | "right" | "random", count: number) {
-    for (let i = 0; i < count; i++) {
-      const s = side === "random" ? (Math.random() < 0.5 ? "left" : "right") : side
-      this.spawnCloud(s)
+    // Вторая башня и второй лучник появляются только после 10 уровня (ближняя)
+    if (level >= 10) {
+      const tower2X = right - 360
+      const t2 = this.createTowerAtPosition(tower2X, towerYGround)
+      const e2 = this.createEnemyArcher(t2.x, t2.topY)
+      this.enemies.push(e2)
     }
   }
 
-  // Создание одного облака строго за левым/правым краем
-  private spawnCloud(side: "left" | "right") {
-    const cam = this.cameras.main
+  // ---------- мечники ----------
+  private spawnSwordsmen(level: number) {
+    // очистка старых мечников
+    for (const s of this.swordsmen) {
+      try { 
+        s.root.destroy(true)
+        this.matter.world.remove(s.bodyPhysics)
+        this.matter.world.remove(s.swordPhysics)
+      } catch {}
+    }
+    this.swordsmen = []
 
-    // случайный масштаб (для разнообразия визуала)
-    const scale = Phaser.Math.FloatBetween(0.7, 1.25)
-
-    // реальная ширина для корректного спавна "за кадром"
-    const tex = this.textures.get("cloud").getSourceImage() as HTMLImageElement
-    const nativeW = tex ? tex.width : 256
-    const displayW = nativeW * scale
-    const margin = 40
-    const extra = Phaser.Math.Between(50, 400) // чуть дальше за краем
-
-    // X строго за пределами видимой области
-    const startX = side === "left"
-      ? cam.scrollX - (displayW / 2) - margin - extra
-      : cam.scrollX + this.scale.width + (displayW / 2) + margin + extra
-
-    // Y случайный в «небе»
-    const startY = Phaser.Math.Between(120, 460)
-
-    const cloud = this.add.image(startX, startY, "cloud")
-      .setOrigin(0.5, 0.5)
-      .setScale(scale)         // ВАЖНО: один раз, без перезаписи 0.2
-      .setAlpha(0.9)
-      .setDepth(-5.95)         // между градиентом (-6) и домами (-5.9)
-      .setScrollFactor(0.45, 0) // лёгкий параллакс
-
-    // единая скорость для всех облаков
-    cloud.setData("speed", this.cloudSpeedPxPerMs)
-
-    // лёгкое «дыхание» по Y
-    cloud.setData("vyAmp", Phaser.Math.FloatBetween(0, 8))
-    cloud.setData("vyFreq", Phaser.Math.FloatBetween(0.001, 0.003))
-    cloud.setData("t0", this.time.now)
-
-    this.clouds.push(cloud)
-  }
-
-  private updateClouds() {
-    if (this.clouds.length === 0) return
-    const cam = this.cameras.main
-    const rightKillX = cam.scrollX + this.scale.width + 260
-    const leftKillX  = cam.scrollX - 260
-    const delta = this.game.loop.delta // мс
-
-    for (let i = this.clouds.length - 1; i >= 0; i--) {
-      const c = this.clouds[i]
-      if (!c.scene) { this.clouds.splice(i, 1); continue }
-
-      // движение всех облаков вправо (единая скорость)
-      const vx = (c.getData("speed") as number) || this.cloudSpeedPxPerMs
-      c.x += vx * delta
-
-      // лёгкое «дыхание»
-      const amp = (c.getData("vyAmp") as number) || 0
-      const freq = (c.getData("vyFreq") as number) || 0
-      const t0 = (c.getData("t0") as number) || 0
-      if (amp > 0 && freq > 0) {
-        const t = this.time.now - t0
-        c.y += Math.sin(t * freq) * 0.15 * (amp / 8)
-      }
-
-      // удаляем далеко за краями
-      if (c.x > rightKillX || c.x < leftKillX - 400) {
-        c.destroy()
-        this.clouds.splice(i, 1)
-      }
+    // спавним 1-3 мечников справа за экраном
+    const numSwordsmen = Phaser.Math.Between(1, 3)
+    const right = this.levelRightX(level)
+    
+    for (let i = 0; i < numSwordsmen; i++) {
+      const spawnX = right + 100 + (i * Phaser.Math.Between(50, 150))
+      const spawnY = this.spawnY
+      
+      // Задержка спавна для разнообразия
+      this.time.delayedCall(i * Phaser.Math.Between(2000, 4000), () => {
+        const swordsman = this.createEnemySwordsman(spawnX, spawnY)
+        this.swordsmen.push(swordsman)
+        // сразу уложим меч в ладонь правой руки
+        this.attachSwordToLeftHand(swordsman)
+      })
     }
   }
+
 }

@@ -171,20 +171,28 @@ export class GameScene extends Phaser.Scene {
     // Удаление стрел, вонзившихся в землю
     this.matter.world.on('collisionstart', (event: any) => {
       for (const pair of event.pairs) {
+        
         const bodyA: any = pair.bodyA
         const bodyB: any = pair.bodyB
         const goA = bodyA?.gameObject
         const goB = bodyB?.gameObject
     
-        // 1) СНАЧАЛА случаи без gameObject (игрок — чистое тело)
-        // Стрелы врагов попадают в игрока
-        if ((goA?.texture?.key === 'arrow' && bodyB === this.player.bodyPhysics && bodyA.owner === 'enemy')
-         || (goB?.texture?.key === 'arrow' && bodyA === this.player.bodyPhysics && bodyB.owner === 'enemy')) {
+        console.log("Collision:", {
+          goA: goA?.texture?.key,
+          goB: goB?.texture?.key,
+          ownerA: bodyA?.owner,
+          ownerB: bodyB?.owner,
+        })
+
+        // --- 1. Стрелы врагов попадают в игрока ---
+        const isArrowA = goA?.texture?.key === 'arrow' && bodyA?.owner === 'enemy'
+        const isArrowB = goB?.texture?.key === 'arrow' && bodyB?.owner === 'enemy'
     
+        if ((isArrowA && bodyB === this.player.bodyPhysics) || (isArrowB && bodyA === this.player.bodyPhysics)) {
           this.takeDamage(1)
     
-          const arrowBody = goA?.texture?.key === 'arrow' ? bodyA : bodyB
-          const arrowGO   = (arrowBody as any).gameObject as Phaser.Physics.Matter.Image
+          const arrowBody = isArrowA ? bodyA : bodyB
+          const arrowGO = (arrowBody as any).gameObject as Phaser.Physics.Matter.Image
     
           if ((arrowBody as any).isFlying) {
             const MatterLib = (Phaser.Physics.Matter as any).Matter
@@ -192,57 +200,52 @@ export class GameScene extends Phaser.Scene {
             Body.setVelocity(arrowBody, { x: 0, y: 0 })
             Body.set(arrowBody, 'angularVelocity', 0)
             Body.setStatic(arrowBody, true)
+            ;(arrowBody as any).isFlying = false
           }
+    
           arrowGO?.destroy()
-          continue  // уже обработали пару
+          continue
         }
     
-        // 2) Далее, всё, что требует обоих gameObject
+        // --- 2. Все остальные случаи требуют обоих gameObject ---
         if (!goA || !goB) continue
     
-        const isArrowA = goA.texture?.key === 'arrow'
-        const isArrowB = goB.texture?.key === 'arrow'
+        const isArrowPlayerA = goA.texture?.key === 'arrow' && bodyA?.owner === 'player'
+        const isArrowPlayerB = goB.texture?.key === 'arrow' && bodyB?.owner === 'player'
         const isGroundA = goA.texture?.key === 'surface' || goA.getData?.('isGround')
         const isGroundB = goB.texture?.key === 'surface' || goB.getData?.('isGround')
     
-        // Стрелы игрока в землю
-        if (isArrowA && isGroundB) this.stickAndScheduleRemove(goA as Phaser.Physics.Matter.Image)
-        if (isArrowB && isGroundA) this.stickAndScheduleRemove(goB as Phaser.Physics.Matter.Image)
-        
-        // Стрелы игрока попадают во врагов (лучников)
-        if (isArrowA && (bodyB as any).gameObject && (bodyA as any).owner === 'player') {
-          const enemyBody = bodyB as any
-          if (enemyBody.gameObject && enemyBody.gameObject.texture?.key === 'enemy_body') {
-            // Останавливаем стрелу игрока при попадании во врага
-            const arrowBody = bodyA as any
-            if (arrowBody.isFlying) {
-              arrowBody.isFlying = false
-              const MatterLib = (Phaser.Physics.Matter as any).Matter
-              const Body = MatterLib.Body
-              Body.setVelocity(arrowBody, { x: 0, y: 0 })
-              Body.set(arrowBody, 'angularVelocity', 0)
-              Body.setStatic(arrowBody, true)
-            }
-            goA.destroy()
+        // --- 3. Стрелы игрока в землю ---
+        if (isArrowPlayerA && isGroundB) this.stickAndScheduleRemove(goA as Phaser.Physics.Matter.Image)
+        if (isArrowPlayerB && isGroundA) this.stickAndScheduleRemove(goB as Phaser.Physics.Matter.Image)
+    
+        // --- 4. Стрелы игрока попадают во врагов (лучников) ---
+        if (isArrowPlayerA && goB.texture?.key === 'enemy_body') {
+          const arrowBody = bodyA as any
+          if (arrowBody.isFlying) {
+            arrowBody.isFlying = false
+            const MatterLib = (Phaser.Physics.Matter as any).Matter
+            const Body = MatterLib.Body
+            Body.setVelocity(arrowBody, { x: 0, y: 0 })
+            Body.set(arrowBody, 'angularVelocity', 0)
+            Body.setStatic(arrowBody, true)
           }
-        } else if (isArrowB && (bodyA as any).gameObject && (bodyB as any).owner === 'player') {
-          const enemyBody = bodyA as any
-          if (enemyBody.gameObject && enemyBody.gameObject.texture?.key === 'enemy_body') {
-            // Останавливаем стрелу игрока при попадании во врага
-            const arrowBody = bodyB as any
-            if (arrowBody.isFlying) {
-              arrowBody.isFlying = false
-              const MatterLib = (Phaser.Physics.Matter as any).Matter
-              const Body = MatterLib.Body
-              Body.setVelocity(arrowBody, { x: 0, y: 0 })
-              Body.set(arrowBody, 'angularVelocity', 0)
-              Body.setStatic(arrowBody, true)
-            }
-            goB.destroy()
+          goA.destroy()
+        } else if (isArrowPlayerB && goA.texture?.key === 'enemy_body') {
+          const arrowBody = bodyB as any
+          if (arrowBody.isFlying) {
+            arrowBody.isFlying = false
+            const MatterLib = (Phaser.Physics.Matter as any).Matter
+            const Body = MatterLib.Body
+            Body.setVelocity(arrowBody, { x: 0, y: 0 })
+            Body.set(arrowBody, 'angularVelocity', 0)
+            Body.setStatic(arrowBody, true)
           }
+          goB.destroy()
         }
       }
     })
+    
   }
 
   // GameScene.ts
@@ -435,10 +438,9 @@ export class GameScene extends Phaser.Scene {
     const bodyPhysics = this.matter.add.rectangle(x, y, 60, 160, { 
       isStatic: true
     })
-    // Настраиваем категории коллизий через Matter.js API
     const MatterLib = (Phaser.Physics.Matter as any).Matter
-    const Body = MatterLib.Body
-    Body.set(bodyPhysics, 'collisionFilter', { category: 0x0001, mask: 0x0002 })
+    MatterLib.Body.set(bodyPhysics, 'collisionFilter', { category: 0x0001, mask: 0x0002 })
+
     return { root, head, body: body as any, leftArm, rightArm, leftLeg: leftLeg as any, rightLeg: rightLeg as any, bowstring, bodyPhysics }
   }
 
@@ -680,17 +682,17 @@ export class GameScene extends Phaser.Scene {
   private enemyShootArrow(enemy: EnemyArcher) {
     const pull = Math.abs(enemy.rightArm.x - enemy.baseRightArmX) / 20
     if (pull <= 0) return
-
+  
     const rightArm = enemy.rightArm as Phaser.GameObjects.Graphics
     const m = (rightArm as any).getWorldTransformMatrix()
-
+  
     const localX = 30
     const localY = -60 + 13 / 2
-
+  
     const spawnX = m.a * localX + m.c * localY + m.tx
     const spawnY = m.b * localX + m.d * localY + m.ty
     const armAngle = Math.atan2(m.b, m.a) + Math.PI
-
+  
     const arrow = this.matter.add.image(spawnX, spawnY, "arrow")
     arrow.setScale(0.1).setRotation(armAngle)
     arrow.setBody({ 
@@ -699,21 +701,23 @@ export class GameScene extends Phaser.Scene {
       height: 6
     })
     arrow.setMass(1)
-    
-    // Настраиваем категории коллизий через Matter.js API
-    const MatterLib = (Phaser.Physics.Matter as any).Matter
-    const Body = MatterLib.Body
-    Body.set(arrow.body, 'collisionFilter', { category: 0x0002, mask: 0x0001 })
-
+  
+    // ✅ Правильная настройка коллизий
+    arrow.setCollisionCategory(0x0002) // враг
+    arrow.setCollidesWith(0x0001)      // игрок
+  
+    // ✅ Метки
+    const arrowBody = arrow.body as any
+    arrowBody.isArrow = true
+    arrowBody.isFlying = true
+    arrowBody.owner = 'enemy'
+  
+    this.arrows.push(arrow)
+  
     const velocity = pull * 15
     arrow.setVelocity(Math.cos(armAngle) * velocity, Math.sin(armAngle) * velocity)
-
-    ;(arrow.body as any).isArrow = true
-    ;(arrow.body as any).isFlying = true
-    ;(arrow.body as any).owner = 'enemy'
-
-    this.arrows.push(arrow)
   }
+  
 
   // ---------- мечники ----------
   private createEnemySwordsman(x: number, y: number): EnemySwordsman {

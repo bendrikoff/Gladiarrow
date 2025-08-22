@@ -762,7 +762,6 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.setupArrowSwordsmanCollision(swordsman)
-    this.setupSwordPlayerCollision(swordsman)
     return swordsman
   }
 
@@ -812,24 +811,21 @@ export class GameScene extends Phaser.Scene {
   
       const distanceToPlayer = Math.abs(s.root.x - this.playerRoot.x)
   
-      if (!s.isAttacking) {
-        // идём, пока не началась атака
+            if (!s.isAttacking && distanceToPlayer <= s.attackRange && now - s.lastAttackTime > s.attackCooldown) {
+        this.playSwordsmanAttack(s)
+      } else if (!s.isAttacking && distanceToPlayer > s.attackRange) {
+        // идём только если игрок далеко
         s.isWalking = true
-  
-        // движение к игроку (слева направо не идём, нам нужно смещение влево)
         const moveSpeed = s.walkSpeed * delta * 0.1
         s.root.x -= moveSpeed
-  
+
         // синк физтела
         const MatterLib = (Phaser.Physics.Matter as any).Matter
         const Body = MatterLib.Body
         Body.setPosition(s.bodyPhysics, { x: s.root.x, y: s.root.y - 50 })
-  
-        // походка
-        this.animateSwordsmanWalking(s, delta)
-  
 
-  
+        // походка
+        this.animateSwordsmanWalking(s, delta)  
         // вышел за экран — удалить
         if (s.root.x < this.cameras.main.scrollX - 200) {
           s.root.destroy(true)
@@ -838,8 +834,11 @@ export class GameScene extends Phaser.Scene {
           this.swordsmen.splice(i, 1)
           continue
         }
-      } else {
+      } else if (s.isAttacking) {
         // в фазе атаки стоим
+        s.isWalking = false
+      } else if (distanceToPlayer <= s.attackRange) {
+        // в диапазоне атаки, но не атакуем (кулдаун) - стоим на месте
         s.isWalking = false
       }
   
@@ -848,11 +847,65 @@ export class GameScene extends Phaser.Scene {
     }
   }
   
-
-
-
-
+  private playSwordsmanAttack(s: EnemySwordsman) {
+    s.isAttacking = true
+    s.isWalking = false
+    s.lastAttackTime = Date.now()
+  
+    const ATTACK_WINDUP = 300   // замах
+    const ATTACK_DURATION = 200 // активная фаза (урон)
+    const ATTACK_RECOVER = 400  // восстановление
+  
+    // 1. Замах левой рукой (с мечом)
+    this.tweens.add({
+      targets: s.leftArm,
+      rotation: -0.8, // назад
+      duration: ATTACK_WINDUP,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        // 2. Активация удара
+        s.isAttacking = true
+  
+        this.tweens.add({
+          targets: s.leftArm,
+          rotation: 0.5, // вперёд
+          duration: ATTACK_DURATION,
+          ease: 'Quad.In',
+          onComplete: () => {
+            this.takeDamage(1)
+            // 3. Восстановление и возврат в исходную
+            s.isAttacking = false
+            this.tweens.add({
+              targets: s.leftArm,
+              rotation: 0, // нейтраль
+              duration: ATTACK_RECOVER,
+              ease: 'Quad.Out',
+              onComplete: () => {
+              // После атаки проверяем, нужно ли идти или остаться на месте
+              const distanceToPlayer = Math.abs(s.root.x - this.playerRoot.x)
+              if (distanceToPlayer > s.attackRange) {
+                // Игрок далеко - можно идти
+                s.isWalking = true
+              } else {
+                // Игрок всё ещё близко - остаёмся на месте
+                s.isWalking = false
+              }
+            }
+            })
+          }
+        })
+      }
+    })
+  }
+  
   private animateSwordsmanWalking(s: EnemySwordsman, _delta: number) {
+    if (!s.isWalking) {
+      // если не идём - возвращаем ноги в нейтральное положение
+      s.leftLeg.rotation = 0
+      s.rightLeg.rotation = 0
+      return
+    }
+    
     const t = this.time.now * 0.005
     s.leftLeg.rotation = Math.sin(t) * 0.3
     s.rightLeg.rotation = Math.sin(t + Math.PI) * 0.3
@@ -1143,25 +1196,6 @@ export class GameScene extends Phaser.Scene {
         if (this.enemies.length === 0 && this.swordsmen.length === 0) this.advanceToNextScreen()
       }
     })
-  }
-
-  private setupSwordPlayerCollision(swordsman: EnemySwordsman) {
-    const handler = (event: any) => {
-      event.pairs.forEach((pair: any) => {
-        let hitPlayer = false
-        if (pair.bodyA === swordsman.swordPhysics && pair.bodyB === this.player.bodyPhysics) {
-          hitPlayer = true
-        } else if (pair.bodyB === swordsman.swordPhysics && pair.bodyA === this.player.bodyPhysics) {
-          hitPlayer = true
-        }
-        if (!hitPlayer || swordsman.isDying || !swordsman.isAttacking) return
-
-        // Игрок получает урон от меча только во время "окна удара"
-        console.log("Игрок получил урон от мечника!")
-        this.takeDamage(1)
-      })
-    }
-    this.matter.world.on("collisionstart", handler as any)
   }
 
   private advanceToNextScreen() {

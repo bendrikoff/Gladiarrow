@@ -114,6 +114,16 @@ export class GameScene extends Phaser.Scene {
   private bushesLayers: Phaser.GameObjects.Image[] = []
   private bushesParallaxFactor = 1
 
+  // облака
+  private clouds: Phaser.GameObjects.Image[] = []
+  private cloudParallaxFactor = 0.3
+  private worldWidth = 0
+  private cloudFieldLength = 100000
+  private cloudSlots: { x: number; instantiated: boolean }[] = []
+
+  // кости на поверхности
+  private bones: Phaser.GameObjects.Image[] = []
+
   constructor() { super("GameScene") }
 
   preload() {
@@ -138,14 +148,27 @@ export class GameScene extends Phaser.Scene {
     // параллакс-фоны
     this.load.image("backHouses", "assets/backHouses.png")
     this.load.image("bushes", "assets/green.png")
+    // облака
+    this.load.image("cloud", "assets/cloud.png")
+    // кости
+    this.load.image("bone1", "assets/bones/bone1.png")
+    this.load.image("bone2", "assets/bones/bone2.png")
+    this.load.image("bone3", "assets/bones/bone3.png")
   }
 
   create() {
     this.createBackground();
     this.screenW = this.scale.width
 
+    // подготовим поле облаков и стартовую отрисовку
+    this.initializeCloudField()
+    this.instantiateCloudsNearView()
+
     // камера: большие границы вправо
-    const worldWidth = this.screenW * 100
+    // мир должен позволять увидеть облака по всей длине поля
+    const desiredWorldW = Math.ceil(this.cloudFieldLength / this.cloudParallaxFactor) + this.screenW
+    const worldWidth = Math.max(this.screenW * 100, desiredWorldW)
+    this.worldWidth = worldWidth
     this.cameras.main.setBounds(0, 0, worldWidth, this.scale.height * 2)
     this.cameras.main.setScroll(0, 0)
 
@@ -154,6 +177,7 @@ export class GameScene extends Phaser.Scene {
 
     // поверхность и параллакс-фоны первого экрана
     this.createSurface(this.levelCenterX(this.currentLevel))
+    this.spawnBonesOnSurface()
     this.createBackHouses(this.levelCenterX(this.currentLevel))
     this.createBushes(this.levelCenterX(this.currentLevel))
 
@@ -318,6 +342,38 @@ export class GameScene extends Phaser.Scene {
       if (a.x < -100 || a.x > this.screenW * 110 || a.y < -200 || a.y > 2200) { a.destroy(); return false }
       return true
     })
+
+    // движение и очистка облаков (с учётом параллакса)
+    const deltaSec = this.game.loop.delta / 1000
+    const cam = this.cameras.main
+    this.instantiateCloudsNearView()
+    for (let i = this.clouds.length - 1; i >= 0; i--) {
+      const c = this.clouds[i]
+      if (!c || !c.scene) { this.clouds.splice(i, 1); continue }
+      const vx = (c.getData && c.getData('vx')) || 0
+      c.x += vx * deltaSec
+
+      // вертикальный лёгкий дрейф
+      const baseY = (c.getData && c.getData('baseY')) || c.y
+      const amp = (c.getData && c.getData('vyAmp')) || 0
+      const freq = (c.getData && c.getData('vyFreq')) || 0
+      const phase = (c.getData && c.getData('vyPhase')) || 0
+      if (amp && freq) {
+        const t = this.time.now / 1000
+        c.y = baseY + Math.sin(t * freq + phase) * amp
+      }
+
+      // превращаем в экранные координаты слоя с параллаксом
+      const renderX = c.x - cam.scrollX * this.cloudParallaxFactor
+      const halfW = (c.displayWidth || c.width) / 2
+      // удаляем, когда облако полностью скрылось за правым краем
+      const offscreenRight = renderX - halfW > this.screenW
+      const offscreenLeft  = renderX + halfW < -100
+      if (offscreenRight || offscreenLeft) {
+        try { c.destroy() } catch {}
+        this.clouds.splice(i, 1)
+      }
+    }
   }
 
   // ---------- helpers уровней/камеры ----------
@@ -936,6 +992,68 @@ export class GameScene extends Phaser.Scene {
     this.setupArrowSurfaceCollision(surf)
   }
 
+  // ---------- кости на поверхности ----------
+  private destroyBones() {
+    for (const b of this.bones) {
+      try { b.destroy() } catch {}
+    }
+    this.bones = []
+  }
+
+  private spawnBonesOnSurface() {
+    if (!this.surface) return
+    this.destroyBones()
+
+    const count = Phaser.Math.Between(1, 5)
+    const keys = ["bone1", "bone2", "bone3"]
+
+    const surf = this.surface
+    const width = surf.displayWidth || (this.textures.get("surface").getSourceImage() as HTMLImageElement).width
+    const leftX = surf.x - width / 2
+    const rightX = surf.x + width / 2
+    // диапазон внутри surface с отступами сверху и снизу
+    const displayH = surf.displayHeight || 0
+    const topY = surf.y - displayH / 2
+    const bottomY = surf.y + displayH / 2
+    const topInset = 100
+    const bottomInset = 100
+    const yMin = topY + topInset;
+    const yMax = bottomY - bottomInset
+
+    // предотвращаем спавн слишком близко друг к другу
+    const placed: { x: number; y: number }[] = []
+    const minDist = 160
+    const maxTriesPerBone = 20
+
+    for (let i = 0; i < count; i++) {
+      const key = Phaser.Utils.Array.GetRandom(keys)
+
+      let attempt = 0
+      let x = 0
+      let y = 0
+      let ok = false
+      while (attempt < maxTriesPerBone) {
+        x = Phaser.Math.Between(Math.floor(leftX + 60), Math.floor(rightX - 60))
+        y = Phaser.Math.Between(Math.floor(yMin), Math.floor(yMax))
+        const conflict = placed.some(p => Phaser.Math.Distance.Between(p.x, p.y, x, y) < minDist)
+        if (!conflict) { ok = true; break }
+        attempt++
+      }
+
+      if (!ok) continue
+
+      const scale = Phaser.Math.FloatBetween(0.18, 0.28)
+      const rot = Phaser.Math.FloatBetween(-0.3, 0.3)
+
+      const img = this.add.image(x, y, key)
+        .setScale(scale)
+        .setRotation(rot)
+        .setDepth(-4.9)
+      this.bones.push(img)
+      placed.push({ x, y })
+    }
+  }
+
   // ---------- задний план (параллакс) ----------
   private createBackHouses(centerX: number) {
     const tex = this.textures.get("backHouses");
@@ -975,6 +1093,122 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(this.bushesParallaxFactor, 0);
 
     this.bushesLayers.push(layer);
+  }
+
+  // ---------- поле облаков (100000) ----------
+  private initializeCloudField() {
+    // равномерное распределение слотов по длине поля (в мировых координатах слоя облаков)
+    const count = Math.max(50, Math.floor(this.cloudFieldLength / 1200))
+    const spacing = this.cloudFieldLength / count
+    this.cloudSlots = []
+    for (let i = 0; i < count; i++) {
+      const x = i * spacing + Phaser.Math.Between(-80, 80)
+      this.cloudSlots.push({ x, instantiated: false })
+    }
+  }
+
+  private instantiateCloudsNearView() {
+    const cam = this.cameras.main
+    // текущий видимый диапазон в координатах слоя облаков (с учётом параллакса)
+    const viewLeft = cam.scrollX * this.cloudParallaxFactor - 100
+    const viewRight = viewLeft + this.screenW + 200
+
+    for (const slot of this.cloudSlots) {
+      if (slot.instantiated) continue
+      if (slot.x >= viewLeft && slot.x <= viewRight) {
+        // создаём облако в позиции slot.x
+        const y = Phaser.Math.Between(70, 340)
+        const scale = Phaser.Math.FloatBetween(0.6, 1.3)
+        const alpha = Phaser.Math.FloatBetween(0.5, 0.9)
+        const baseSpeed = Phaser.Math.FloatBetween(12, 28)
+        const speedByScale = baseSpeed * (1.6 - Math.min(1.4, Math.max(0.6, scale)))
+        const vx = Phaser.Math.FloatBetween(speedByScale * 0.8, speedByScale * 1.2)
+
+        const cloud = this.add.image(slot.x, y, "cloud")
+          .setOrigin(0.5, 0.5)
+          .setScale(scale)
+          .setAlpha(alpha)
+          .setDepth(-5.95)
+          .setScrollFactor(this.cloudParallaxFactor, 0)
+
+        const vyAmp  = Phaser.Math.FloatBetween(4, 12)
+        const vyFreq = Phaser.Math.FloatBetween(0.2, 0.5)
+        const vyPhase = Phaser.Math.FloatBetween(0, Math.PI * 2)
+
+        ;(cloud as any).setData && cloud.setData('vx', vx)
+        ;(cloud as any).setData && cloud.setData('baseY', y)
+        ;(cloud as any).setData && cloud.setData('vyAmp', vyAmp)
+        ;(cloud as any).setData && cloud.setData('vyFreq', vyFreq)
+        ;(cloud as any).setData && cloud.setData('vyPhase', vyPhase)
+
+        this.clouds.push(cloud)
+        slot.instantiated = true
+      }
+    }
+  }
+
+  private spawnCloud(opts?: { xOffset?: number; y?: number; vx?: number }) {
+    const cam = this.cameras.main
+    // подбираем Y с учётом уже существующих облаков у правого края
+    let y = opts?.y ?? Phaser.Math.Between(70, 340)
+    const scale = Phaser.Math.FloatBetween(0.6, 1.3)
+    const alpha = Phaser.Math.FloatBetween(0.5, 0.9)
+    // скорость: меньше облако — быстрее (для разнообразия)
+    const baseSpeed = Phaser.Math.FloatBetween(12, 28)
+    const speedByScale = baseSpeed * (1.6 - Math.min(1.4, Math.max(0.6, scale)))
+    const vx = opts?.vx ?? Phaser.Math.FloatBetween(speedByScale * 0.8, speedByScale * 1.2)
+
+    // создаём и настраиваем
+    const cloud = this.add.image(0, y, "cloud")
+      .setOrigin(0.5, 0.5)
+      .setScale(scale)
+      .setAlpha(alpha)
+      .setDepth(-5.95)
+      .setScrollFactor(this.cloudParallaxFactor, 0)
+
+    // спавним по значению из поля (если есть смещение — используем его)
+    const offscreenMargin = 24
+    const spawnX = cam.scrollX * this.cloudParallaxFactor + this.screenW + offscreenMargin + (opts?.xOffset ?? 0)
+    cloud.x = spawnX
+
+    // Доп. параметры дрейфа по Y
+    const vyAmp  = Phaser.Math.FloatBetween(4, 12)
+    const vyFreq = Phaser.Math.FloatBetween(0.2, 0.5)
+    const vyPhase = Phaser.Math.FloatBetween(0, Math.PI * 2)
+
+    ;(cloud as any).setData && cloud.setData('vx', vx)
+    ;(cloud as any).setData && cloud.setData('baseY', y)
+    ;(cloud as any).setData && cloud.setData('vyAmp', vyAmp)
+    ;(cloud as any).setData && cloud.setData('vyFreq', vyFreq)
+    ;(cloud as any).setData && cloud.setData('vyPhase', vyPhase)
+    ;(cloud as any).setData && cloud.setData('level', this.currentLevel)
+
+    // попытка разнести по высоте рядом с правым краем
+    const minYGap = 50
+    const renderSpawnX = this.screenW
+    let tries = 0
+    while (tries < 8) {
+      const conflict = this.clouds.some(c => {
+        const rx = c.x - cam.scrollX * this.cloudParallaxFactor
+        return Math.abs(rx - renderSpawnX) < 220 && Math.abs(c.y - cloud.y) < minYGap
+      })
+      if (!conflict) break
+      cloud.y = Phaser.Math.Between(70, 340)
+      ;(cloud as any).setData && cloud.setData('baseY', cloud.y)
+      tries++
+    }
+
+    this.clouds.push(cloud)
+  }
+
+  // отключили регулярный спавн — теперь спавним только при переходе уровня
+
+  private spawnInitialClouds(count: number) {
+    // Не используется в новой системе поля
+  }
+
+  private spawnCloudsRightPack() {
+    // В новой системе поле управляет распределением — не используем пакетный спавн
   }
 
   private destroyBackHouses() {
@@ -1204,8 +1438,7 @@ export class GameScene extends Phaser.Scene {
     this.isPlayerMoving = true
     this.currentLevel += 1
 
-    // Восстанавливаем здоровье при переходе на новый уровень
-    this.heal(this.maxHealth)
+    // Не восстанавливаем здоровье между уровнями
 
     const targetPlayerX = this.levelLeftX(this.currentLevel) + 100
 
@@ -1213,6 +1446,7 @@ export class GameScene extends Phaser.Scene {
 
     // пересоздаём основу уровня
     this.createSurface(this.levelCenterX(this.currentLevel))
+    this.spawnBonesOnSurface()
 
     // пересоздаём параллакс-слои (очистка + создание)
     this.createBackHouses(this.levelCenterX(this.currentLevel))
@@ -1252,7 +1486,11 @@ export class GameScene extends Phaser.Scene {
           })
         }
       },
-      onComplete: () => { bob.stop(); this.isPlayerMoving = false }
+      onComplete: () => {
+        bob.stop();
+        this.isPlayerMoving = false
+        this.spawnCloudsRightPack()
+      }
     })
   }
 

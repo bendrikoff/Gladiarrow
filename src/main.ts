@@ -20,7 +20,7 @@ const config: Phaser.Types.Core.GameConfig = {
     default: 'matter', 
     matter: {
       gravity: { y: 0.6 },
-      debug: true
+      debug: false
     }
   },
   // Target frame rate
